@@ -1,0 +1,6 @@
+{
+  "name": "Staff Hours",
+  "description": "A complete staff hours and payroll tracking application for restaurant personnel and managers.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

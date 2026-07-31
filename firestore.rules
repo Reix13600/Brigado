@@ -1,0 +1,91 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // managers/{uid} -> { restaurantId, email }
+    // A lookup table: does this signed-in uid manage this restaurant?
+    // Only readable by the manager's own doc (no directory browsing) and
+    // never writable from the client — managers are added via the Admin
+    // SDK seed script, not through the app.
+    match /managers/{uid} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow write: if false;
+    }
+
+    function isManagerOf(restaurantId) {
+      return request.auth != null
+        && exists(/databases/$(database)/documents/managers/$(request.auth.uid))
+        && get(/databases/$(database)/documents/managers/$(request.auth.uid)).data.restaurantId == restaurantId;
+    }
+
+    // Any signed-in visitor (including anonymous staff sessions) can read
+    // the app's data — this is a small single-location staff tool, not a
+    // multi-tenant SaaS with per-user secrecy. Writes are the boundary.
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    match /restaurants/{restaurantId} {
+      allow read: if isSignedIn();
+      // config/staff/dayNotes/weekNotes live on this doc — manager-only.
+      allow write: if isManagerOf(restaurantId);
+
+      match /entries/{entryId} {
+        allow read: if isSignedIn();
+        // Staff can log their own hours (new doc, status must start
+        // pending/correction — never self-approve) or edit their own
+        // pending/correction rows. Managers can do anything, including
+        // approvals.
+        allow create: if isSignedIn() && (
+          isManagerOf(restaurantId) ||
+          (request.resource.data.status in ['pending', 'correction'])
+        );
+        allow update: if isManagerOf(restaurantId) || (
+          isSignedIn() &&
+          resource.data.status in ['pending', 'correction'] &&
+          request.resource.data.name == resource.data.name
+        );
+        allow delete: if isManagerOf(restaurantId);
+      }
+
+      match /advances/{advanceId} {
+        allow read: if isSignedIn();
+        allow write: if isManagerOf(restaurantId);
+      }
+
+      match /scheduledShifts/{shiftId} {
+        allow read: if isSignedIn();
+        allow write: if isManagerOf(restaurantId);
+      }
+
+      // Live clock-in state. Same trust model as `entries`: identity is
+      // enforced by the in-app PIN, not by Firebase Auth (staff sessions
+      // are anonymous), so any signed-in visitor may write here — the app
+      // itself only lets a PIN-unlocked staff member act as themselves.
+      match /activeClockIns/{staffName} {
+        allow read: if isSignedIn();
+        allow write: if isSignedIn();
+      }
+
+      // Phase 3: messaging, time-off requests, open cover-swap requests.
+      // Same trust model as above throughout.
+      match /announcements/{id} {
+        allow read: if isSignedIn();
+        allow write: if isManagerOf(restaurantId);
+      }
+      match /messages/{id} {
+        allow read: if isSignedIn();
+        allow write: if isSignedIn();
+      }
+      match /timeOffRequests/{id} {
+        allow read: if isSignedIn();
+        allow write: if isSignedIn();
+      }
+      match /swapRequests/{id} {
+        allow read: if isSignedIn();
+        allow write: if isSignedIn();
+      }
+    }
+  }
+}

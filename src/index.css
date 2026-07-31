@@ -1,0 +1,422 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+/* Animations and Utilities */
+@layer utilities {
+  .scrollbar-thin::-webkit-scrollbar {
+    height: 4px;
+    width: 4px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: #1e293b;
+    border-radius: 2px;
+  }
+  
+  @keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  
+  @keyframes slideUp {
+    from { transform: translateY(10px); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+  }
+
+  @keyframes slideDown {
+    from { transform: translateY(-10px); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+  }
+
+  @keyframes scaleIn {
+    from { transform: scale(0.95); opacity: 0; }
+    to { transform: scale(1); opacity: 1; }
+  }
+
+  @keyframes shake {
+    0%, 100% { transform: translateX(0); }
+    20%, 60% { transform: translateX(-4px); }
+    40%, 80% { transform: translateX(4px); }
+  }
+
+  .animate-fade-in {
+    animation: fadeIn 0.25s ease-out forwards;
+  }
+
+  .animate-slide-up {
+    animation: slideUp 0.3s ease-out forwards;
+  }
+
+  .animate-slide-down {
+    animation: slideDown 0.25s ease-out forwards;
+  }
+
+  .animate-scale-in {
+    animation: scaleIn 0.2s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+  }
+
+  .animate-shake {
+    animation: shake 0.35s ease-in-out;
+  }
+}
+
+/* High-Contrast Light Mode overrides for bright restaurant environments */
+.theme-light, 
+.theme-light body, 
+.theme-light #manager-app,
+.theme-light .bg-slate-950 {
+  background-color: #f1f5f9 !important; /* Elegant light slate page background */
+  color: #0f172a !important; /* Deep near-black text for reading */
+}
+
+/* Base resets */
+.theme-light body, .theme-light html {
+  background-color: #f1f5f9 !important;
+  color: #0f172a !important;
+}
+
+/* Primary Card Backgrounds: White panels with subtle shadow for professional elevation */
+.theme-light .bg-slate-900,
+.theme-light .bg-slate-900\/90,
+.theme-light .bg-slate-900\/80,
+.theme-light .bg-slate-950\/90,
+.theme-light .bg-slate-950\/80,
+.theme-light .bg-slate-950\/50,
+.theme-light #manager-app > div.print\:hidden {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.03), 0 2px 4px -2px rgba(0, 0, 0, 0.03) !important;
+  border-color: #e2e8f0 !important;
+}
+
+/* Nested Containers and Secondary Section Wrappers: Soft, cool light grays, no ugly dark grey boxes */
+.theme-light .bg-slate-900\/50,
+.theme-light .bg-slate-900\/40,
+.theme-light .bg-slate-900\/30,
+.theme-light .bg-slate-900\/60,
+.theme-light .bg-slate-950\/40,
+.theme-light .bg-slate-950\/20,
+.theme-light .bg-slate-950\/10,
+.theme-light .bg-slate-850,
+.theme-light .bg-slate-800,
+.theme-light .bg-slate-800\/20,
+.theme-light .bg-slate-800\/40,
+.theme-light .bg-slate-800\/60,
+.theme-light .bg-slate-800\/80,
+.theme-light .bg-slate-800\/10 {
+  background-color: #f8fafc !important; /* Beautiful crisp off-white/light gray */
+  color: #0f172a !important;
+  border-color: #cbd5e1 !important;
+}
+
+/* Custom header/bar resets */
+.theme-light .bg-slate-900.border-b,
+.theme-light .sticky.top-0 {
+  background-color: #ffffff !important;
+  border-color: #e2e8f0 !important;
+  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05) !important;
+}
+
+/* Text overrides: dark, crisp, legible slate & charcoal text */
+.theme-light .text-slate-100,
+.theme-light .text-slate-200,
+.theme-light .text-slate-300 {
+  color: #0f172a !important; /* Jet black headers */
+}
+
+.theme-light .text-slate-400 {
+  color: #334155 !important; /* High contrast dark charcoal buttons and captions */
+}
+
+.theme-light .text-slate-500,
+.theme-light .text-slate-600 {
+  color: #475569 !important; /* Highly readable description/meta text */
+}
+
+.theme-light .text-slate-700 {
+  color: #1e293b !important;
+}
+
+/* Hover effects */
+.theme-light .hover\:bg-slate-900:hover,
+.theme-light .hover\:bg-slate-950\/10:hover,
+.theme-light .hover\:bg-slate-800:hover,
+.theme-light .hover\:bg-slate-850:hover,
+.theme-light .hover\:bg-slate-900\/30:hover {
+  background-color: #e2e8f0 !important;
+  color: #0f172a !important;
+}
+
+.theme-light .hover\:text-slate-100:hover,
+.theme-light .hover\:text-slate-200:hover {
+  color: #0f172a !important;
+}
+
+/* Borders: Light-gray borders that outline slots and structures nicely */
+.theme-light .border-slate-800,
+.theme-light .border-slate-850,
+.theme-light .border-slate-900,
+.theme-light .border-slate-800\/20,
+.theme-light .border-slate-800\/40,
+.theme-light .border-slate-800\/60,
+.theme-light .border-slate-800\/80,
+.theme-light .border-slate-700,
+.theme-light .border-slate-700\/80,
+.theme-light .border-slate-700\/50,
+.theme-light .border-slate-700\/40,
+.theme-light .border-slate-700\/30,
+.theme-light .border-slate-600 {
+  border-color: #cbd5e1 !important;
+}
+
+/* Inputs and Forms */
+.theme-light input,
+.theme-light select,
+.theme-light textarea {
+  background-color: #ffffff !important;
+  border-color: #cbd5e1 !important;
+  color: #0f172a !important;
+}
+
+.theme-light input::placeholder,
+.theme-light select::placeholder,
+.theme-light textarea::placeholder {
+  color: #94a3b8 !important;
+}
+
+/* PIN Keyboard Buttons style */
+.theme-light .grid-cols-3 button {
+  background-color: #ffffff !important;
+  border-color: #cbd5e1 !important;
+  color: #0f172a !important;
+  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05) !important;
+}
+
+.theme-light .grid-cols-3 button:hover {
+  background-color: #f1f5f9 !important;
+}
+
+/* Table overrides */
+.theme-light td, .theme-light th {
+  border-color: #cbd5e1 !important;
+  color: #0f172a !important;
+}
+
+/* Primary Accents (Lime-400 mapped to high-contrast Dark Emerald Green) */
+.theme-light .bg-lime-400 {
+  background-color: #16a34a !important;
+  color: #ffffff !important;
+}
+
+.theme-light .hover\:bg-lime-300:hover {
+  background-color: #15803d !important;
+  color: #ffffff !important;
+}
+
+.theme-light .text-lime-400 {
+  color: #16a34a !important;
+  font-weight: 700 !important;
+}
+
+.theme-light .hover\:text-lime-400:hover {
+  color: #15803d !important;
+}
+
+.theme-light .border-lime-400 {
+  border-color: #16a34a !important;
+}
+
+.theme-light .border-lime-400\/30 {
+  border-color: #86efac !important;
+}
+
+.theme-light .bg-lime-400\/10,
+.theme-light .bg-lime-400\/5,
+.theme-light .bg-lime-400\/[0.03],
+.theme-light .bg-lime-400\/[0.02] {
+  background-color: #f0fdf4 !important;
+  color: #16a34a !important;
+  border-color: #bbf7d0 !important;
+}
+
+.theme-light .border-lime-400\/40,
+.theme-light .border-lime-400\/50 {
+  border-color: #86efac !important;
+}
+
+/* Force correct text color for labels inside lime backgrounds */
+.theme-light .bg-lime-400.text-slate-950,
+.theme-light .bg-lime-400 .text-slate-950,
+.theme-light [class*="bg-lime-"].text-slate-950,
+.theme-light button.bg-lime-400 {
+  color: #ffffff !important;
+}
+
+/* Absent (Rose) styling for light mode */
+.theme-light .text-rose-400 {
+  color: #e11d48 !important; /* Rose-600 */
+}
+.theme-light .border-rose-400 {
+  border-color: #f43f5e !important;
+}
+.theme-light .bg-rose-400\/10 {
+  background-color: #fff1f2 !important;
+  color: #e11d48 !important;
+  border-color: #fecdd3 !important;
+}
+
+/* Sick (Orange) styling for light mode */
+.theme-light .text-orange-400 {
+  color: #ea580c !important; /* Orange-600 */
+}
+.theme-light .border-orange-400 {
+  border-color: #f97316 !important;
+}
+.theme-light .bg-orange-400\/10 {
+  background-color: #fff7ed !important;
+  color: #ea580c !important;
+  border-color: #ffedd5 !important;
+}
+
+/* Holiday (Sky) styling for light mode */
+.theme-light .text-sky-400 {
+  color: #0284c7 !important; /* Sky-600 */
+}
+.theme-light .border-sky-400 {
+  border-color: #38bdf8 !important;
+}
+.theme-light .bg-sky-400\/10 {
+  background-color: #f0f9ff !important;
+  color: #0284c7 !important;
+  border-color: #e0f2fe !important;
+}
+
+/* Amber highlights (warning alerts) */
+.theme-light .bg-amber-400 {
+  background-color: #d97706 !important;
+  color: #ffffff !important;
+}
+
+.theme-light .hover\:bg-amber-300:hover {
+  background-color: #b45309 !important;
+}
+
+.theme-light .text-amber-400 {
+  color: #b45309 !important;
+}
+
+.theme-light .border-amber-400 {
+  border-color: #d97706 !important;
+}
+
+.theme-light .bg-amber-400\/10 {
+  background-color: #fef3c7 !important;
+  color: #b45309 !important;
+}
+
+/* Indigo (Holidays) styling for light mode */
+.theme-light .text-indigo-400 {
+  color: #4f46e5 !important; /* Indigo-600 */
+}
+.theme-light .bg-indigo-500\/10 {
+  background-color: #e0e7ff !important;
+  color: #4f46e5 !important;
+}
+.theme-light .bg-indigo-500\/\[0\.04\],
+.theme-light .bg-indigo-500\/\[0\.015\] {
+  background-color: #f5f3ff !important; /* Soft violet background */
+  border-color: #c7d2fe !important;
+}
+.theme-light .border-indigo-500\/20 {
+  border-color: #cbd5e1 !important;
+}
+
+/* Interactive shift block elements */
+.theme-light .group\/shift {
+  background-color: #f8fafc !important;
+  border-color: #cbd5e1 !important;
+  color: #0f172a !important;
+}
+
+.theme-light .group\/shift span,
+.theme-light .group\/shift div {
+  color: #1e293b !important;
+}
+
+/* In the Staff Hours grid/calendar, make inactive dates distinguishable but readable */
+.theme-light .opacity-50 {
+  opacity: 0.65 !important;
+}
+.theme-light .opacity-30 {
+  opacity: 0.45 !important;
+}
+
+/* Modal styling in light mode */
+.theme-light .fixed.inset-0 {
+  background-color: rgba(15, 23, 42, 0.4) !important;
+}
+
+
+/* ── PRINT: "Hide alerts" clean roster printout ────────────
+ * Fixes: toggling "hide alerts & overtime warnings" previously only hid
+ * the small warning icons/text, leaving conflicting shifts and overtime
+ * badges rendered in bright red with a pulsing animation, which still
+ * looked alarming on a printed page. This neutralizes that styling too,
+ * for print output only, when the toggle is on.
+ * `!important` is required here because the conflict/overtime colors on
+ * shift cards are set via inline `style` attributes, which normally beat
+ * plain stylesheet rules — an `!important` stylesheet rule is the one
+ * thing that legitimately overrides an inline style without !important. */
+@media print {
+  .print-hide-alerts .shift-card-conflict {
+    background-color: transparent !important;
+    border-color: #cbd5e1 !important;
+    color: inherit !important;
+    animation: none !important;
+    box-shadow: none !important;
+  }
+  .print-hide-alerts .ot-badge-danger,
+  .print-hide-alerts .ot-badge-warn {
+    background-color: transparent !important;
+    border-color: #cbd5e1 !important;
+    color: inherit !important;
+    animation: none !important;
+  }
+}
+
+/* ── PRINT: QR poster (print ONLY the poster, hide everything else) ── */
+@media print {
+  @page {
+    size: auto;
+    margin: 12mm;
+  }
+  /* Any print-driven modal (QR poster, timesheet, etc.) renders via a
+     portal as a direct child of <body>, tagged with .print-portal-root.
+     The :has() guard matters: without it, this rule would hide the
+     ENTIRE app during every print action — including normal ones (Roster
+     Planner print, Entries print) that never open a portal at all. Only
+     activate when a portal modal genuinely exists. */
+  body:has(.print-portal-root) > *:not(.print-portal-root) {
+    display: none !important;
+  }
+  #qr-poster-print-area {
+    position: static !important;
+    width: 160mm !important;
+    margin: 0 auto;
+    box-shadow: none !important;
+  }
+  #timesheet-print-area {
+    position: static !important;
+    width: 186mm !important;
+    margin: 0 auto;
+    border: none !important;
+    box-shadow: none !important;
+  }
+}

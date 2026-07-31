@@ -1,0 +1,170 @@
+import React from "react";
+import { createPortal } from "react-dom";
+import { X, Printer, Download } from "lucide-react";
+import { HourEntry, StaffMember, CashAdvance, RoleType } from "../types";
+
+interface BookkeeperExportProps {
+  staff: StaffMember[];
+  periodEntries: HourEntry[]; // already filtered to the selected period, all staff
+  periodAdvances: CashAdvance[]; // already filtered to the selected period, all staff
+  periodLabel: string;
+  restoName: string;
+  roleLabels: Record<RoleType, string>;
+  lang: "en" | "fr";
+  onClose: () => void;
+}
+
+interface Row {
+  name: string;
+  role: string;
+  hours: number;
+  rate: number;
+  gross: number;
+  advances: number;
+}
+
+export default function BookkeeperExport({
+  staff, periodEntries, periodAdvances, periodLabel, restoName, roleLabels, lang, onClose,
+}: BookkeeperExportProps) {
+  const rows: Row[] = staff
+    .filter(s => s.active !== false)
+    .map(s => {
+      const hours = periodEntries
+        .filter(e => e.name === s.name && e.type === "worked" && e.status === "approved")
+        .reduce((sum, e) => sum + e.hours, 0);
+      const advances = periodAdvances
+        .filter(a => a.name === s.name)
+        .reduce((sum, a) => sum + a.amount, 0);
+      return {
+        name: s.name,
+        role: roleLabels[s.role] ?? s.role,
+        hours: Math.round(hours * 100) / 100,
+        rate: s.rate,
+        gross: Math.round(hours * s.rate * 100) / 100,
+        advances,
+      };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  const totals = rows.reduce(
+    (acc, r) => ({ hours: acc.hours + r.hours, gross: acc.gross + r.gross, advances: acc.advances + r.advances }),
+    { hours: 0, gross: 0, advances: 0 }
+  );
+
+  const generatedAt = new Date().toLocaleString(lang === "fr" ? "fr-FR" : "en-US", {
+    day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit",
+  });
+
+  const handleDownloadCSV = () => {
+    const headers = [
+      lang === "fr" ? "Nom" : "Name",
+      lang === "fr" ? "Poste" : "Role",
+      lang === "fr" ? "Période" : "Period",
+      lang === "fr" ? "Heures travaillées" : "Hours worked",
+      lang === "fr" ? "Taux horaire" : "Hourly rate",
+      lang === "fr" ? "Brut" : "Gross pay",
+      lang === "fr" ? "Avances" : "Advances",
+    ];
+    const csvRows = rows.map(r => [r.name, r.role, periodLabel, r.hours.toFixed(2), r.rate.toFixed(2), r.gross.toFixed(2), r.advances.toFixed(2)]);
+    const csvLines = [headers, ...csvRows].map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(","));
+    const blob = new Blob([csvLines.join("\r\n")], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `brigado-bookkeeper-${periodLabel.replace(/[^a-zA-Z0-9]+/g, "-")}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  return createPortal(
+    <div className="print-portal-root fixed inset-0 bg-slate-950/80 z-50 flex flex-col items-center justify-center gap-4 p-4 overflow-y-auto">
+      <div className="print:hidden flex gap-2">
+        <button
+          className="px-4 py-2 bg-slate-800 border border-slate-700 text-slate-200 rounded-xl hover:bg-slate-700 transition-all flex items-center gap-2 text-sm font-semibold"
+          onClick={handleDownloadCSV}
+        >
+          <Download size={16} /> {lang === "fr" ? "Télécharger CSV" : "Download CSV"}
+        </button>
+        <button
+          className="px-4 py-2 bg-lime-400 text-slate-950 font-bold rounded-xl hover:bg-lime-300 transition-all flex items-center gap-2 text-sm"
+          onClick={() => window.print()}
+        >
+          <Printer size={16} /> {lang === "fr" ? "Imprimer" : "Print"}
+        </button>
+        <button
+          className="px-4 py-2 bg-slate-900 border border-slate-800 text-slate-300 rounded-xl text-sm"
+          onClick={onClose}
+        >
+          <X size={16} className="inline mr-1" /> {lang === "fr" ? "Fermer" : "Close"}
+        </button>
+      </div>
+
+      <div id="timesheet-print-area" className="bg-white text-slate-900 rounded-2xl p-8 w-full max-w-3xl shadow-2xl text-sm">
+        <div className="flex justify-between items-start border-b border-slate-300 pb-4 mb-4">
+          <div>
+            <h1 className="text-lg font-extrabold">{restoName || "—"}</h1>
+            <p className="text-xs text-slate-500 mt-0.5">
+              {lang === "fr" ? "Export comptable — heures et salaires bruts" : "Bookkeeper export — hours and gross pay"}
+            </p>
+          </div>
+          <div className="text-right text-xs text-slate-500">
+            <p>{lang === "fr" ? "Généré le" : "Generated on"} {generatedAt}</p>
+            <p className="italic">{lang === "fr" ? "Document généré par Brigado" : "Document generated by Brigado"}</p>
+          </div>
+        </div>
+
+        <div className="mb-4 text-xs">
+          <span className="text-slate-500 uppercase font-bold tracking-wider text-[10px]">{lang === "fr" ? "Période" : "Period"}</span>
+          <p className="font-semibold text-sm">{periodLabel}</p>
+        </div>
+
+        <table className="w-full text-xs border-collapse mb-4">
+          <thead>
+            <tr className="border-b border-slate-300 text-slate-500 uppercase text-[10px]">
+              <th className="text-left py-1.5">{lang === "fr" ? "Nom" : "Name"}</th>
+              <th className="text-left py-1.5">{lang === "fr" ? "Poste" : "Role"}</th>
+              <th className="text-right py-1.5">{lang === "fr" ? "Heures" : "Hours"}</th>
+              <th className="text-right py-1.5">{lang === "fr" ? "Taux" : "Rate"}</th>
+              <th className="text-right py-1.5">{lang === "fr" ? "Brut" : "Gross"}</th>
+              <th className="text-right py-1.5">{lang === "fr" ? "Avances" : "Advances"}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 ? (
+              <tr><td colSpan={6} className="text-center py-4 text-slate-400 italic">{lang === "fr" ? "Aucune donnée pour cette période." : "No data for this period."}</td></tr>
+            ) : rows.map(r => (
+              <tr key={r.name} className="border-b border-slate-100">
+                <td className="py-1.5 font-semibold">{r.name}</td>
+                <td className="py-1.5">{r.role}</td>
+                <td className="py-1.5 text-right font-mono">{r.hours.toFixed(2)}h</td>
+                <td className="py-1.5 text-right font-mono">€{r.rate.toFixed(2)}</td>
+                <td className="py-1.5 text-right font-mono font-semibold">€{r.gross.toFixed(2)}</td>
+                <td className="py-1.5 text-right font-mono">{r.advances > 0 ? `€${r.advances.toFixed(2)}` : "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+          {rows.length > 0 && (
+            <tfoot>
+              <tr className="border-t-2 border-slate-400 font-bold">
+                <td className="py-2" colSpan={2}>{lang === "fr" ? "Total" : "Total"}</td>
+                <td className="py-2 text-right font-mono">{totals.hours.toFixed(2)}h</td>
+                <td></td>
+                <td className="py-2 text-right font-mono">€{totals.gross.toFixed(2)}</td>
+                <td className="py-2 text-right font-mono">{totals.advances > 0 ? `€${totals.advances.toFixed(2)}` : "—"}</td>
+              </tr>
+            </tfoot>
+          )}
+        </table>
+
+        <p className="text-[9px] text-slate-400 mt-6 italic">
+          {lang === "fr"
+            ? "Ce document présente les heures travaillées et le salaire brut (heures × taux horaire) sans aucun calcul de charges, taxes ou déductions — ces calculs relèvent de votre comptable."
+            : "This document shows worked hours and gross pay (hours × hourly rate) with no tax, charge, or deduction calculations — that math is left to your bookkeeper."}
+        </p>
+      </div>
+    </div>,
+    document.body
+  );
+}

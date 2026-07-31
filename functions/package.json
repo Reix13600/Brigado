@@ -1,0 +1,23 @@
+{
+  "name": "brigado-functions",
+  "description": "Server-side logic for Brigado: Stripe webhook + restaurant provisioning, weekly digest emails.",
+  "engines": {
+    "node": "22"
+  },
+  "main": "lib/index.js",
+  "scripts": {
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "deploy": "npm run build && firebase deploy --only functions",
+    "logs": "firebase functions:log"
+  },
+  "dependencies": {
+    "firebase-admin": "^14.2.0",
+    "firebase-functions": "^7.3.0",
+    "stripe": "^17.4.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  },
+  "private": true
+}

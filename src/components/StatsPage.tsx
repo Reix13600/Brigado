@@ -4,10 +4,11 @@ import {
   RadialBarChart, RadialBar, LineChart, Line,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
 } from "recharts";
-import { BarChart3, AlertTriangle, Flag, Gauge } from "lucide-react";
+import { BarChart3, AlertTriangle, Flag, Gauge, ChevronLeft, ChevronRight, X } from "lucide-react";
 import { AppData, RoleType, StaffMember } from "../types";
 import { getRoleColor } from "../utils/roleColors";
 import { saveWeekRevenue } from "../utils/api";
+import MiniCalendar from "./MiniCalendar";
 
 interface StatsPageProps {
   appData: AppData;
@@ -61,18 +62,46 @@ function Sparkline({ data, color }: { data: number[]; color: string }) {
   );
 }
 
+const mondayOf = (d: Date) => {
+  const day = d.getDay() || 7;
+  const m = new Date(d);
+  m.setDate(d.getDate() - day + 1);
+  m.setHours(0, 0, 0, 0);
+  return m;
+};
+
+// Local calendar-date string — deliberately NOT toISOString(), which
+// converts to UTC first and silently shifts the date backward by one
+// day for any positive UTC offset (all of metropolitan France included).
+const toDateStr = (d: Date) => {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+};
+
 export default function StatsPage({ appData, lang, theme, onRefresh }: StatsPageProps) {
   const [statsWeeks, setStatsWeeks] = useState<number>(8);
   const [revenueDrafts, setRevenueDrafts] = useState<Record<string, string>>({});
   const [savingRevenue, setSavingRevenue] = useState<string | null>(null);
+  const [busiestWeekOffset, setBusiestWeekOffset] = useState<number>(0);
+  const [dismissedAbsentees, setDismissedAbsentees] = useState<Set<string>>(new Set());
+  const [selectedRevenueDate, setSelectedRevenueDate] = useState<string>(toDateStr(new Date()));
 
   const taxRate = appData.config.tax_rate ?? 0;
   const chartAxisColor = theme === "light" ? "#64748b" : "#94a3b8";
   const chartGridColor = theme === "light" ? "#e2e8f0" : "#1e293b";
+  const tooltipTextColor = theme === "light" ? "#1e293b" : "#e2e8f0";
   const tooltipStyle = {
     backgroundColor: theme === "light" ? "#ffffff" : "#0f172a",
     border: "1px solid #334155", fontSize: 12, borderRadius: 8,
+    color: tooltipTextColor,
   };
+  // Recharts defaults both the tooltip label and each item's text to
+  // black, which disappears against the dark theme's cards — every
+  // <Tooltip> below must pass these explicitly to stay readable.
+  const tooltipLabelStyle = { color: tooltipTextColor, fontWeight: 600, marginBottom: 4 };
+  const tooltipItemStyle = { color: tooltipTextColor };
   const roleLabel = (r: RoleType) => ROLE_LABELS[r]?.[lang] ?? r;
 
   const now = new Date();
@@ -83,13 +112,7 @@ export default function StatsPage({ appData, lang, theme, onRefresh }: StatsPage
   const approvedWorked = inRange.filter(e => e.status === "approved" && e.type === "worked");
   const staffByName: Record<string, StaffMember> = Object.fromEntries(appData.staff.map(s => [s.name, s]));
 
-  const weekKeyOf = (dateStr: string) => {
-    const d = new Date(dateStr);
-    const day = d.getDay() || 7;
-    const monday = new Date(d);
-    monday.setDate(d.getDate() - day + 1);
-    return monday.toISOString().slice(0, 10);
-  };
+  const weekKeyOf = (dateStr: string) => toDateStr(mondayOf(new Date(dateStr)));
 
   // ── Weekly buckets: hours, cost, flagged count, revenue ──
   const weekBuckets: Record<string, { hours: number; cost: number; flagged: number }> = {};
@@ -129,7 +152,7 @@ export default function StatsPage({ appData, lang, theme, onRefresh }: StatsPage
   const costTrendingUp = trendData.length >= 3 &&
     trendData[trendData.length - 1].cost > (trendData.slice(0, -1).reduce((s, d) => s + d.cost, 0) / Math.max(1, trendData.length - 1)) * 1.15;
 
-  // ── Role breakdown ──
+  // ── Role breakdown (donut) ──
   const roleHours: Record<string, number> = {};
   approvedWorked.forEach(e => {
     const role = staffByName[e.name]?.role ?? "other";
@@ -142,6 +165,7 @@ export default function StatsPage({ appData, lang, theme, onRefresh }: StatsPage
       hours: Math.round(hours * 10) / 10,
       color: getRoleColor(role as RoleType, theme),
     }));
+  const totalRoleHours = roleData.reduce((s, r) => s + r.hours, 0);
 
   // ── Overtime tracker ──
   const staffHoursTotal: Record<string, number> = {};
@@ -155,22 +179,34 @@ export default function StatsPage({ appData, lang, theme, onRefresh }: StatsPage
     }))
     .sort((a, b) => b.avgWeekly - a.avgWeekly);
 
-  // ── NEW: Busiest day of week ──
-  const dayHours = [0, 0, 0, 0, 0, 0, 0]; // Mon..Sun
-  approvedWorked.forEach(e => {
+  // ── Busiest day of week — a single navigable week, not the whole period ──
+  const dayLabels = lang === "fr" ? ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"] : ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+  const busiestWeekStart = mondayOf(new Date());
+  busiestWeekStart.setDate(busiestWeekStart.getDate() - busiestWeekOffset * 7);
+  const busiestWeekEnd = new Date(busiestWeekStart);
+  busiestWeekEnd.setDate(busiestWeekStart.getDate() + 6);
+
+  const busiestWeekEntries = appData.entries.filter(e => {
+    if (e.status !== "approved" || e.type !== "worked") return false;
+    const d = new Date(e.date + "T00:00:00");
+    return d >= busiestWeekStart && d <= busiestWeekEnd;
+  });
+  const busiestDayHours = [0, 0, 0, 0, 0, 0, 0]; // Mon..Sun
+  busiestWeekEntries.forEach(e => {
     const d = new Date(e.date + "T00:00:00");
     const idx = (d.getDay() + 6) % 7;
-    dayHours[idx] += e.hours;
+    busiestDayHours[idx] += e.hours;
   });
-  const dayLabels = lang === "fr" ? ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"] : ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
   const busiestDayData = dayLabels.map((label, i) => ({
     day: label,
-    hours: Math.round(dayHours[i] * 10) / 10,
+    hours: Math.round(busiestDayHours[i] * 10) / 10,
     isWeekend: i >= 5,
   }));
   const busiestDay = busiestDayData.reduce((max, d) => (d.hours > max.hours ? d : max), busiestDayData[0]);
+  const dateFmt = (d: Date) => d.toLocaleDateString(lang === "fr" ? "fr-FR" : "en-US", { day: "2-digit", month: "short" });
+  const busiestWeekLabel = `${dateFmt(busiestWeekStart)} – ${dateFmt(busiestWeekEnd)}`;
 
-  // ── NEW: Absence rate ──
+  // ── Absence rate ──
   const dayTypeEntries = inRange.filter(e => e.status === "approved" && (e.type === "worked" || e.type === "absent" || e.type === "sick"));
   const absenceEntries = dayTypeEntries.filter(e => e.type === "absent" || e.type === "sick");
   const absenceRate = dayTypeEntries.length > 0 ? (absenceEntries.length / dayTypeEntries.length) * 100 : 0;
@@ -182,16 +218,38 @@ export default function StatsPage({ appData, lang, theme, onRefresh }: StatsPage
   });
   const topAbsentees = Object.entries(absenceByPerson)
     .map(([name, v]) => ({ name, rate: v.total > 0 ? (v.absences / v.total) * 100 : 0, absences: v.absences }))
-    .filter(x => x.absences > 0)
+    // Archived (former) staff are hidden automatically; dismissedAbsentees
+    // covers the case where someone left but hasn't been archived yet.
+    .filter(x => x.absences > 0 && staffByName[x.name]?.active !== false && !dismissedAbsentees.has(x.name))
     .sort((a, b) => b.rate - a.rate)
     .slice(0, 5);
 
-  // ── NEW: Labor cost as % of revenue (only over weeks with revenue entered) ──
+  // ── Labor cost as % of revenue (only over weeks with revenue entered) ──
   const weeksWithRevenue = weekKeysSorted.filter(k => revenueByWeek[k] != null && revenueByWeek[k] > 0);
   const revenueCoveredCost = weeksWithRevenue.reduce((s, k) => s + weekBuckets[k].cost, 0);
   const revenueCoveredRevenue = weeksWithRevenue.reduce((s, k) => s + (revenueByWeek[k] || 0), 0);
   const costPctOfRevenue = revenueCoveredRevenue > 0 ? (revenueCoveredCost / revenueCoveredRevenue) * 100 : null;
   const gaugeColor = costPctOfRevenue === null ? "#475569" : costPctOfRevenue <= 35 ? "#a3e635" : costPctOfRevenue <= 45 ? "#fbbf24" : "#f87171";
+
+  // Calendar-driven revenue picker: click any day, it resolves to that
+  // day's Monday-anchored week, which is what actually gets saved.
+  const selectedRevenueWeekKey = weekKeyOf(selectedRevenueDate);
+  const selectedRevenueWeekStart = new Date(selectedRevenueWeekKey + "T00:00:00");
+  const selectedRevenueWeekDates = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(selectedRevenueWeekStart);
+    d.setDate(d.getDate() + i);
+    return toDateStr(d);
+  });
+  const revenueMarkedDates = weeksWithRevenue.flatMap(weekKey => {
+    const start = new Date(weekKey + "T00:00:00");
+    return Array.from({ length: 7 }, (_, i) => {
+      const d = new Date(start);
+      d.setDate(d.getDate() + i);
+      return toDateStr(d);
+    });
+  });
+  const selectedWeekCost = weekBuckets[selectedRevenueWeekKey]?.cost ?? 0;
+  const selectedWeekSavedRevenue = revenueByWeek[selectedRevenueWeekKey];
 
   const handleSaveRevenue = async (weekKey: string) => {
     const raw = revenueDrafts[weekKey];
@@ -282,7 +340,7 @@ export default function StatsPage({ appData, lang, theme, onRefresh }: StatsPage
                   <CartesianGrid strokeDasharray="3 3" stroke={chartGridColor} />
                   <XAxis dataKey="week" tick={{ fontSize: 10, fill: chartAxisColor }} />
                   <YAxis tick={{ fontSize: 10, fill: chartAxisColor }} />
-                  <Tooltip contentStyle={tooltipStyle} />
+                  <Tooltip contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle} />
                   <Area type="monotone" dataKey="hours" stroke="#a3e635" strokeWidth={2} fill="url(#hoursGradient)" />
                 </AreaChart>
               </ResponsiveContainer>
@@ -303,27 +361,56 @@ export default function StatsPage({ appData, lang, theme, onRefresh }: StatsPage
                   <CartesianGrid strokeDasharray="3 3" stroke={chartGridColor} />
                   <XAxis dataKey="week" tick={{ fontSize: 10, fill: chartAxisColor }} />
                   <YAxis tick={{ fontSize: 10, fill: chartAxisColor }} />
-                  <Tooltip contentStyle={tooltipStyle} formatter={(v: number) => [`€${v}`, lang === "fr" ? "Coût" : "Cost"]} />
+                  <Tooltip contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle} formatter={(v: number) => [`€${v}`, lang === "fr" ? "Coût" : "Cost"]} />
                   <Area type="monotone" dataKey="cost" stroke="#a3e635" strokeWidth={2} fill="url(#costGradient)" />
                 </AreaChart>
               </ResponsiveContainer>
             </div>
           </div>
 
-          {/* ROLE BREAKDOWN + OVERTIME TRACKER */}
+          {/* ROLE BREAKDOWN (futuristic donut) + OVERTIME TRACKER */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-lg">
               <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider mb-4">
                 {lang === "fr" ? "Répartition par poste (heures)" : "Hours by role"}
               </h3>
-              <ResponsiveContainer width="100%" height={220}>
-                <PieChart>
-                  <Pie data={roleData} dataKey="hours" nameKey="name" cx="50%" cy="50%" outerRadius={80} label={(entry: any) => `${entry.name}`}>
-                    {roleData.map((entry, i) => <Cell key={i} fill={entry.color} />)}
-                  </Pie>
-                  <Tooltip contentStyle={tooltipStyle} formatter={(v: number) => [`${v}h`, ""]} />
-                </PieChart>
-              </ResponsiveContainer>
+              <div className="relative" style={{ filter: "drop-shadow(0 0 14px rgba(163,230,53,0.12))" }}>
+                <ResponsiveContainer width="100%" height={220}>
+                  <PieChart>
+                    <defs>
+                      {roleData.map(r => (
+                        <linearGradient key={r.role} id={`roleGrad-${r.role}`} x1="0" y1="0" x2="1" y2="1">
+                          <stop offset="0%" stopColor={r.color} stopOpacity={1} />
+                          <stop offset="100%" stopColor={r.color} stopOpacity={0.55} />
+                        </linearGradient>
+                      ))}
+                    </defs>
+                    <Pie
+                      data={roleData} dataKey="hours" nameKey="name"
+                      cx="50%" cy="50%" innerRadius={60} outerRadius={88}
+                      paddingAngle={3} cornerRadius={6} stroke="none"
+                    >
+                      {roleData.map((entry, i) => (
+                        <Cell key={i} fill={`url(#roleGrad-${entry.role})`} />
+                      ))}
+                    </Pie>
+                    <Tooltip contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle} formatter={(v: number) => [`${v}h`, ""]} />
+                  </PieChart>
+                </ResponsiveContainer>
+                <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                  <div className="text-xl font-mono font-bold text-slate-100">{totalRoleHours.toFixed(0)}h</div>
+                  <div className="text-[9px] text-slate-500 uppercase tracking-wider">{lang === "fr" ? "Total" : "Total"}</div>
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-1.5 justify-center mt-2">
+                {roleData.map(r => (
+                  <div key={r.role} className="flex items-center gap-1.5 text-[10px] bg-slate-950/40 rounded-full px-2.5 py-1">
+                    <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: r.color }} />
+                    <span className="text-slate-300">{r.name}</span>
+                    <span className="text-slate-500 font-mono">{r.hours}h</span>
+                  </div>
+                ))}
+              </div>
             </div>
 
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-lg">
@@ -335,8 +422,8 @@ export default function StatsPage({ appData, lang, theme, onRefresh }: StatsPage
                   <CartesianGrid strokeDasharray="3 3" stroke={chartGridColor} />
                   <XAxis type="number" tick={{ fontSize: 10, fill: chartAxisColor }} />
                   <YAxis type="category" dataKey="name" width={70} tick={{ fontSize: 10, fill: chartAxisColor }} />
-                  <Tooltip contentStyle={tooltipStyle} />
-                  <Legend wrapperStyle={{ fontSize: 10 }} />
+                  <Tooltip contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle} />
+                  <Legend wrapperStyle={{ fontSize: 10 }} formatter={(value: string) => <span style={{ color: chartAxisColor }}>{value}</span>} />
                   <Bar dataKey="contract" name={lang === "fr" ? "Contrat" : "Contract"} fill={theme === "light" ? "#cbd5e1" : "#334155"} radius={[0, 4, 4, 0]} />
                   <Bar dataKey="avgWeekly" name={lang === "fr" ? "Moy. réel" : "Avg actual"} fill="#a3e635" radius={[0, 4, 4, 0]} />
                 </BarChart>
@@ -344,12 +431,34 @@ export default function StatsPage({ appData, lang, theme, onRefresh }: StatsPage
             </div>
           </div>
 
-          {/* NEW: BUSIEST DAY OF WEEK + ABSENCE RATE */}
+          {/* BUSIEST DAY OF WEEK (week-navigable) + ABSENCE RATE */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-lg">
-              <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider mb-1">
-                {lang === "fr" ? "Jours les plus chargés" : "Busiest days of the week"}
-              </h3>
+              <div className="flex items-center justify-between mb-1">
+                <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider">
+                  {lang === "fr" ? "Jours les plus chargés" : "Busiest days of the week"}
+                </h3>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setBusiestWeekOffset(o => o + 1)}
+                    className="p-1 rounded-md hover:bg-slate-800 text-slate-400 hover:text-slate-200"
+                    aria-label={lang === "fr" ? "Semaine précédente" : "Previous week"}
+                  >
+                    <ChevronLeft size={14} />
+                  </button>
+                  <span className="text-[10px] text-slate-500 font-mono w-24 text-center">{busiestWeekLabel}</span>
+                  <button
+                    type="button"
+                    onClick={() => setBusiestWeekOffset(o => Math.max(0, o - 1))}
+                    disabled={busiestWeekOffset === 0}
+                    className="p-1 rounded-md hover:bg-slate-800 text-slate-400 hover:text-slate-200 disabled:opacity-30 disabled:pointer-events-none"
+                    aria-label={lang === "fr" ? "Semaine suivante" : "Next week"}
+                  >
+                    <ChevronRight size={14} />
+                  </button>
+                </div>
+              </div>
               <p className="text-[10px] text-slate-500 mb-4">
                 {lang === "fr" ? `Le plus chargé : ${busiestDay?.day ?? "—"}` : `Busiest: ${busiestDay?.day ?? "—"}`}
               </p>
@@ -358,7 +467,7 @@ export default function StatsPage({ appData, lang, theme, onRefresh }: StatsPage
                   <CartesianGrid strokeDasharray="3 3" stroke={chartGridColor} />
                   <XAxis dataKey="day" tick={{ fontSize: 10, fill: chartAxisColor }} />
                   <YAxis tick={{ fontSize: 10, fill: chartAxisColor }} />
-                  <Tooltip contentStyle={tooltipStyle} formatter={(v: number) => [`${v}h`, lang === "fr" ? "Heures" : "Hours"]} />
+                  <Tooltip contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle} formatter={(v: number) => [`${v}h`, lang === "fr" ? "Heures" : "Hours"]} />
                   <Bar dataKey="hours" radius={[6, 6, 0, 0]}>
                     {busiestDayData.map((d, i) => <Cell key={i} fill={d.isWeekend ? "#60a5fa" : "#a3e635"} />)}
                   </Bar>
@@ -383,7 +492,18 @@ export default function StatsPage({ appData, lang, theme, onRefresh }: StatsPage
                   {topAbsentees.map(a => (
                     <div key={a.name} className="flex items-center justify-between text-xs bg-slate-950/40 rounded-lg px-3 py-2">
                       <span className="text-slate-300">{a.name}</span>
-                      <span className="font-mono text-amber-400">{a.rate.toFixed(0)}% ({a.absences})</span>
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-amber-400">{a.rate.toFixed(0)}% ({a.absences})</span>
+                        <button
+                          type="button"
+                          onClick={() => setDismissedAbsentees(prev => new Set(prev).add(a.name))}
+                          className="text-slate-600 hover:text-rose-400 transition-colors"
+                          title={lang === "fr" ? "Masquer (a quitté ?)" : "Hide (left the team?)"}
+                          aria-label={lang === "fr" ? "Masquer" : "Hide"}
+                        >
+                          <X size={12} />
+                        </button>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -391,7 +511,7 @@ export default function StatsPage({ appData, lang, theme, onRefresh }: StatsPage
             </div>
           </div>
 
-          {/* NEW: FLAGGED ENTRIES TREND */}
+          {/* FLAGGED ENTRIES TREND — gradient area, matches the hours/cost look */}
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-lg">
             <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider mb-1 flex items-center gap-1.5">
               <Flag size={13} className="text-rose-400" /> {lang === "fr" ? "Tendance des heures signalées" : "Flagged entries trend"}
@@ -400,28 +520,34 @@ export default function StatsPage({ appData, lang, theme, onRefresh }: StatsPage
               {lang === "fr" ? "Saisies soumises sans scan QR récent — signalé au manager uniquement." : "Entries submitted without a fresh QR scan — manager-only signal."}
             </p>
             <ResponsiveContainer width="100%" height={180}>
-              <BarChart data={trendData}>
+              <AreaChart data={trendData}>
+                <defs>
+                  <linearGradient id="flaggedGradient" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#f43f5e" stopOpacity={0.5} />
+                    <stop offset="100%" stopColor="#f43f5e" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
                 <CartesianGrid strokeDasharray="3 3" stroke={chartGridColor} />
                 <XAxis dataKey="week" tick={{ fontSize: 10, fill: chartAxisColor }} />
                 <YAxis tick={{ fontSize: 10, fill: chartAxisColor }} allowDecimals={false} />
-                <Tooltip contentStyle={tooltipStyle} />
-                <Bar dataKey="flagged" name={lang === "fr" ? "Signalées" : "Flagged"} fill="#f43f5e" radius={[6, 6, 0, 0]} />
-              </BarChart>
+                <Tooltip contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle} formatter={(v: number) => [v, lang === "fr" ? "Signalées" : "Flagged"]} />
+                <Area type="monotone" dataKey="flagged" stroke="#f43f5e" strokeWidth={2} fill="url(#flaggedGradient)" dot={{ r: 3, fill: "#f43f5e", strokeWidth: 0 }} />
+              </AreaChart>
             </ResponsiveContainer>
           </div>
 
-          {/* NEW: LABOR COST AS % OF REVENUE */}
+          {/* LABOR COST AS % OF REVENUE — calendar-driven entry */}
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-lg">
             <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider mb-1 flex items-center gap-1.5">
               <Gauge size={13} className="text-lime-400" /> {lang === "fr" ? "Coût de la main-d'œuvre en % du CA" : "Labor cost as % of revenue"}
             </h3>
             <p className="text-[10px] text-slate-500 mb-4">
               {lang === "fr"
-                ? "Repère habituel : 25–35%. Renseignez le chiffre d'affaires par semaine ci-dessous pour l'activer."
-                : "Common target: 25–35%. Enter weekly revenue below to activate this."}
+                ? "Repère habituel : 25–35%. Cliquez une date dans le calendrier pour renseigner le CA de sa semaine."
+                : "Common target: 25–35%. Click a date on the calendar to enter that week's revenue."}
             </p>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-center">
-              <div className="flex flex-col items-center justify-center">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 items-start">
+              <div className="flex flex-col items-center justify-center md:col-span-1">
                 {costPctOfRevenue === null ? (
                   <div className="text-center py-6">
                     <p className="text-sm text-slate-500">{lang === "fr" ? "Aucune donnée de CA pour cette période." : "No revenue data for this period yet."}</p>
@@ -447,25 +573,41 @@ export default function StatsPage({ appData, lang, theme, onRefresh }: StatsPage
                 )}
               </div>
 
-              <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
-                {trendData.slice().reverse().map(d => (
-                  <div key={d.key} className="flex items-center gap-2 bg-slate-950/40 rounded-lg px-3 py-2">
-                    <span className="text-[10px] text-slate-400 w-16 flex-shrink-0">{d.week}</span>
-                    <span className="text-[10px] text-slate-600 flex-shrink-0">€{d.cost}</span>
-                    <div className="flex items-center gap-1 flex-1">
-                      <span className="text-[10px] text-slate-500">€</span>
-                      <input
-                        type="number"
-                        className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-xs text-slate-200"
-                        placeholder={lang === "fr" ? "CA" : "Revenue"}
-                        defaultValue={d.revenue ?? ""}
-                        onChange={e => setRevenueDrafts(prev => ({ ...prev, [d.key]: e.target.value }))}
-                        onBlur={() => handleSaveRevenue(d.key)}
-                      />
-                    </div>
-                    {savingRevenue === d.key && <span className="text-[9px] text-lime-400">...</span>}
+              <div className="md:col-span-2 flex flex-col sm:flex-row gap-4 items-start">
+                <MiniCalendar
+                  anchorDate={selectedRevenueDate}
+                  highlightDates={selectedRevenueWeekDates}
+                  lang={lang}
+                  navigable
+                  onDateClick={d => setSelectedRevenueDate(d)}
+                  markedDates={revenueMarkedDates}
+                />
+                <div className="flex-1 w-full bg-slate-950/40 rounded-xl px-4 py-3 space-y-2">
+                  <div className="text-[10px] text-slate-400">
+                    {lang === "fr" ? "Semaine du" : "Week of"} {dateFmt(selectedRevenueWeekStart)} – {dateFmt(new Date(selectedRevenueWeekDates[6] + "T00:00:00"))}
                   </div>
-                ))}
+                  <div className="text-[10px] text-slate-600">
+                    {lang === "fr" ? "Coût main-d'œuvre" : "Labor cost"}: €{Math.round(selectedWeekCost)}
+                  </div>
+                  <div className="flex items-center gap-2 pt-1">
+                    <span className="text-xs text-slate-500">€</span>
+                    <input
+                      type="number"
+                      className="flex-1 bg-slate-900 border border-slate-800 rounded px-2 py-1.5 text-sm text-slate-200"
+                      placeholder={lang === "fr" ? "Chiffre d'affaires" : "Revenue"}
+                      value={revenueDrafts[selectedRevenueWeekKey] ?? (selectedWeekSavedRevenue ?? "")}
+                      onChange={e => setRevenueDrafts(prev => ({ ...prev, [selectedRevenueWeekKey]: e.target.value }))}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => handleSaveRevenue(selectedRevenueWeekKey)}
+                      disabled={savingRevenue === selectedRevenueWeekKey}
+                      className="px-3 py-1.5 rounded-lg bg-lime-400 text-slate-950 text-xs font-bold hover:bg-lime-300 disabled:opacity-50 flex-shrink-0"
+                    >
+                      {savingRevenue === selectedRevenueWeekKey ? "..." : (lang === "fr" ? "Enreg." : "Save")}
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
           </div>

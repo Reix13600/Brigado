@@ -175,6 +175,10 @@ export interface AppData {
   advances: CashAdvance[];
   dayNotes: Record<string, string>; // YYYY-MM-DD -> note
   weekNotes: Record<string, string>; // "week:YYYY-MM-DD" -> note
+  // Manager-entered weekly revenue, keyed by the Monday of that week
+  // (YYYY-MM-DD) — powers the labor-cost-as-%-of-revenue stat. Only
+  // populated for weeks the manager has actually filled in.
+  revenueByWeek?: Record<string, number>;
   scheduledShifts: ScheduledShift[];
   activeClockIns: ActiveClockIn[];
   announcements: Announcement[];

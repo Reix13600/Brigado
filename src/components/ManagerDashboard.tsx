@@ -16,6 +16,7 @@ import MiniCalendar from "./MiniCalendar";
 import Timesheet from "./Timesheet";
 import BookkeeperExport from "./BookkeeperExport";
 import InfoTooltip from "./InfoTooltip";
+import StatsPage from "./StatsPage";
 import logoIcon from "../assets/logo-icon.png";
 import { getRoleColor } from "../utils/roleColors";
 import { COMPLIANCE_RULES, isRuleEnabled, defaultComplianceRules, NOT_TRACKED_EN, NOT_TRACKED_FR, ComplianceCategory } from "../utils/compliance";
@@ -249,7 +250,6 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
   const [selectedScheduleShift, setSelectedScheduleShift] = useState<ScheduledShift | null>(null);
   const [scheduleModalOpen, setScheduleModalOpen] = useState<boolean>(false);
   const [printHideAlerts, setPrintHideAlerts] = useState<boolean>(true);
-  const [statsWeeks, setStatsWeeks] = useState<number>(8);
   const [printHideTotals, setPrintHideTotals] = useState<boolean>(false);
   const [scheduleForm, setScheduleForm] = useState<{
     name: string;
@@ -3682,205 +3682,9 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
         </div>
       )}
 
-      {activeTab === "stats" && (() => {
-        const now = new Date();
-        const weeksBack = statsWeeks;
-        const rangeStart = new Date(now);
-        rangeStart.setDate(rangeStart.getDate() - weeksBack * 7);
-
-        const approvedInRange = appData.entries.filter(
-          e => e.status === "approved" && e.type === "worked" && new Date(e.date) >= rangeStart
-        );
-
-        const weekKeyOf = (dateStr: string) => {
-          const d = new Date(dateStr);
-          const day = d.getDay() || 7;
-          const monday = new Date(d);
-          monday.setDate(d.getDate() - day + 1);
-          return monday.toISOString().slice(0, 10);
-        };
-
-        const staffByName: Record<string, StaffMember> = Object.fromEntries(appData.staff.map(s => [s.name, s]));
-
-        const weekBuckets: Record<string, { hours: number; cost: number }> = {};
-        approvedInRange.forEach(e => {
-          const key = weekKeyOf(e.date);
-          const rate = staffByName[e.name]?.rate ?? 0;
-          if (!weekBuckets[key]) weekBuckets[key] = { hours: 0, cost: 0 };
-          weekBuckets[key].hours += e.hours;
-          weekBuckets[key].cost += e.hours * rate * (1 - taxRate / 100);
-        });
-        const trendData = Object.entries(weekBuckets)
-          .sort(([a], [b]) => a.localeCompare(b))
-          .map(([week, v]) => ({
-            week: new Date(week).toLocaleDateString(lang === "fr" ? "fr-FR" : "en-US", { day: "2-digit", month: "short" }),
-            hours: Math.round(v.hours * 10) / 10,
-            cost: Math.round(v.cost),
-          }));
-
-        const roleHours: Record<string, number> = {};
-        approvedInRange.forEach(e => {
-          const role = staffByName[e.name]?.role ?? "other";
-          roleHours[role] = (roleHours[role] ?? 0) + e.hours;
-        });
-        const roleData = Object.entries(roleHours)
-          .filter(([, h]) => h > 0)
-          .map(([role, hours]) => ({
-            role, name: ROLES[role as RoleType],
-            hours: Math.round(hours * 10) / 10,
-            color: RC[role as RoleType],
-          }));
-
-        const staffHours: Record<string, number> = {};
-        approvedInRange.forEach(e => { staffHours[e.name] = (staffHours[e.name] ?? 0) + e.hours; });
-        const otData = appData.staff
-          .map(s => ({
-            name: s.name,
-            contract: s.contract,
-            avgWeekly: weeksBack > 0 ? Math.round(((staffHours[s.name] ?? 0) / weeksBack) * 10) / 10 : 0,
-          }))
-          .sort((a, b) => b.avgWeekly - a.avgWeekly);
-
-        const totalHours = approvedInRange.reduce((s, e) => s + e.hours, 0);
-        const totalCost = approvedInRange.reduce((s, e) => s + e.hours * (staffByName[e.name]?.rate ?? 0) * (1 - taxRate / 100), 0);
-        const avgPerStaff = appData.staff.length > 0 ? totalHours / appData.staff.length : 0;
-        const pendingCount = appData.entries.filter(e => e.status === "pending" || e.status === "correction").length;
-        const advancesInRange = appData.advances
-          .filter(a => new Date(a.date) >= rangeStart)
-          .reduce((s, a) => s + a.amount, 0);
-
-        const chartAxisColor = theme === "light" ? "#64748b" : "#94a3b8";
-        const chartGridColor = theme === "light" ? "#e2e8f0" : "#1e293b";
-        const tooltipStyle = {
-          backgroundColor: theme === "light" ? "#ffffff" : "#0f172a",
-          border: "1px solid #334155", fontSize: 12, borderRadius: 8,
-        };
-
-        return (
-          <div className="space-y-6 animate-fade-in">
-            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-lg">
-              <h2 className="text-sm font-bold text-slate-100 flex items-center gap-2">
-                <BarChart3 size={16} className="text-lime-400" /> {t("stats")}
-              </h2>
-              <div className="flex items-center gap-1 bg-slate-950 border border-slate-800 rounded-xl p-1 text-xs font-semibold">
-                {[4, 8, 12, 26].map(w => (
-                  <button
-                    key={w}
-                    className={`px-3 py-1.5 rounded-lg transition-all ${statsWeeks === w ? "bg-lime-400 text-slate-950" : "text-slate-400 hover:text-slate-200"}`}
-                    onClick={() => setStatsWeeks(w)}
-                  >
-                    {w === 26 ? (lang === "fr" ? "6 mois" : "6 months") : `${w} ${lang === "fr" ? "sem." : "wks"}`}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <div className="bg-slate-900 border border-slate-800/80 rounded-2xl p-4 space-y-1">
-                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">{t("totalHours")}</div>
-                <div className="text-2xl font-mono font-bold text-slate-100">{totalHours.toFixed(1)}h</div>
-              </div>
-              <div className="bg-slate-900 border border-slate-800/80 rounded-2xl p-4 space-y-1">
-                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">{t("netCost")}</div>
-                <div className="text-2xl font-mono font-bold text-lime-400">€{totalCost.toFixed(0)}</div>
-              </div>
-              <div className="bg-slate-900 border border-slate-800/80 rounded-2xl p-4 space-y-1">
-                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">{lang === "fr" ? "Moy. h / employé" : "Avg h / staff"}</div>
-                <div className="text-2xl font-mono font-bold text-slate-100">{avgPerStaff.toFixed(1)}h</div>
-              </div>
-              <div className={`bg-slate-900 border rounded-2xl p-4 space-y-1 ${pendingCount > 0 ? "border-amber-500/30" : "border-slate-800/80"}`}>
-                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">{lang === "fr" ? "En attente" : "Pending approvals"}</div>
-                <div className={`text-2xl font-mono font-bold ${pendingCount > 0 ? "text-amber-400" : "text-slate-100"}`}>{pendingCount}</div>
-              </div>
-            </div>
-
-            {trendData.length === 0 ? (
-              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8 text-center text-sm text-slate-500">
-                {lang === "fr" ? "Pas encore assez de données approuvées pour cette période." : "Not enough approved data yet for this period."}
-              </div>
-            ) : (
-              <>
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                  <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-lg">
-                    <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider mb-4">
-                      {lang === "fr" ? "Tendance des heures (par semaine)" : "Hours trend (weekly)"}
-                    </h3>
-                    <ResponsiveContainer width="100%" height={220}>
-                      <BarChart data={trendData}>
-                        <CartesianGrid strokeDasharray="3 3" stroke={chartGridColor} />
-                        <XAxis dataKey="week" tick={{ fontSize: 10, fill: chartAxisColor }} />
-                        <YAxis tick={{ fontSize: 10, fill: chartAxisColor }} />
-                        <Tooltip contentStyle={tooltipStyle} />
-                        <Bar dataKey="hours" fill="#a3e635" radius={[6, 6, 0, 0]} />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </div>
-
-                  <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-lg">
-                    <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider mb-4">
-                      {lang === "fr" ? "Coût de la main-d'œuvre (net, par semaine)" : "Labor cost (net, weekly)"}
-                    </h3>
-                    <ResponsiveContainer width="100%" height={220}>
-                      <LineChart data={trendData}>
-                        <CartesianGrid strokeDasharray="3 3" stroke={chartGridColor} />
-                        <XAxis dataKey="week" tick={{ fontSize: 10, fill: chartAxisColor }} />
-                        <YAxis tick={{ fontSize: 10, fill: chartAxisColor }} />
-                        <Tooltip contentStyle={tooltipStyle} formatter={(v: number) => [`€${v}`, lang === "fr" ? "Coût" : "Cost"]} />
-                        <Line type="monotone" dataKey="cost" stroke="#a3e635" strokeWidth={2} dot={{ r: 3 }} />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                  <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-lg">
-                    <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider mb-4">
-                      {lang === "fr" ? "Répartition par poste (heures)" : "Hours by role"}
-                    </h3>
-                    <ResponsiveContainer width="100%" height={220}>
-                      <PieChart>
-                        <Pie data={roleData} dataKey="hours" nameKey="name" cx="50%" cy="50%" outerRadius={80} label={(entry) => `${entry.name}`}>
-                          {roleData.map((entry, i) => <Cell key={i} fill={entry.color} />)}
-                        </Pie>
-                        <Tooltip contentStyle={tooltipStyle} formatter={(v: number) => [`${v}h`, ""]} />
-                      </PieChart>
-                    </ResponsiveContainer>
-                  </div>
-
-                  <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-lg">
-                    <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider mb-4">
-                      {lang === "fr" ? "Heures moy./semaine vs. contrat" : "Avg weekly hours vs. contract"}
-                    </h3>
-                    <ResponsiveContainer width="100%" height={220}>
-                      <BarChart data={otData} layout="vertical" margin={{ left: 10 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke={chartGridColor} />
-                        <XAxis type="number" tick={{ fontSize: 10, fill: chartAxisColor }} />
-                        <YAxis type="category" dataKey="name" width={70} tick={{ fontSize: 10, fill: chartAxisColor }} />
-                        <Tooltip contentStyle={tooltipStyle} />
-                        <Legend wrapperStyle={{ fontSize: 10 }} />
-                        <Bar dataKey="contract" name={lang === "fr" ? "Contrat" : "Contract"} fill={theme === "light" ? "#cbd5e1" : "#334155"} radius={[0, 4, 4, 0]} />
-                        <Bar dataKey="avgWeekly" name={lang === "fr" ? "Moy. réel" : "Avg actual"} fill="#a3e635" radius={[0, 4, 4, 0]} />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </div>
-                </div>
-              </>
-            )}
-
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-lg flex items-center justify-between">
-              <div>
-                <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider">
-                  {lang === "fr" ? "Avances en espèces (période)" : "Cash advances (period)"}
-                </h3>
-                <p className="text-[11px] text-slate-500 mt-1">
-                  {lang === "fr" ? "Total avancé sur la période sélectionnée" : "Total advanced over the selected period"}
-                </p>
-              </div>
-              <div className="text-2xl font-mono font-bold text-amber-400">€{advancesInRange.toFixed(0)}</div>
-            </div>
-          </div>
-        );
-      })()}
+      {activeTab === "stats" && (
+        <StatsPage appData={appData} lang={lang} theme={theme} onRefresh={onRefresh} />
+      )}
 
       {/* ── PARAMÈTRES (SETTINGS) TAB ───────────────────────── */}
       {activeTab === "settings" && (

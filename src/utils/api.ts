@@ -116,6 +116,7 @@ export async function fetchAppData(): Promise<AppData> {
     staff: restoData.staff ?? DEFAULT_STAFF,
     dayNotes: restoData.dayNotes ?? {},
     weekNotes: restoData.weekNotes ?? {},
+    revenueByWeek: restoData.revenueByWeek ?? {},
     entries,
     advances,
     scheduledShifts,
@@ -219,6 +220,18 @@ export async function saveWeekNote(key: string, note: string): Promise<Record<st
   }
   await updateDoc(restoRef(), { weekNotes });
   return weekNotes;
+}
+
+export async function saveWeekRevenue(key: string, amount: number): Promise<Record<string, number>> {
+  const restoSnap = await getDoc(restoRef());
+  const revenueByWeek = { ...(restoSnap.data()?.revenueByWeek ?? {}) };
+  if (amount > 0) {
+    revenueByWeek[key] = amount;
+  } else {
+    delete revenueByWeek[key];
+  }
+  await updateDoc(restoRef(), { revenueByWeek });
+  return revenueByWeek;
 }
 
 export async function clockIn(name: string, flagged: boolean, note: string): Promise<ActiveClockIn[]> {

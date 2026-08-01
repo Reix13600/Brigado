@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { ArrowLeft } from "lucide-react";
 import { LandingLang } from "../utils/landingCopy";
 import Footer from "./Footer";
+import MarketingBackground from "./MarketingBackground";
 import logoFull from "../assets/logo-full.png";
 
 interface LegalPageProps {
@@ -22,11 +23,12 @@ export default function LegalPage({ type }: LegalPageProps) {
   const title = TITLES[type][lang];
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 font-sans flex flex-col">
-      <div className="max-w-3xl mx-auto px-6 pt-10 pb-16 flex-1 w-full">
-        <div className="flex items-center justify-between mb-10">
-          <a href="/" className="flex items-center gap-2 text-sm text-slate-400 hover:text-lime-400 transition-colors">
-            <ArrowLeft size={16} /> {lang === "fr" ? "Retour à l'accueil" : "Back to home"}
+    <div className="relative min-h-screen bg-slate-950 text-slate-100 font-sans flex flex-col">
+      <MarketingBackground />
+      <div className="max-w-3xl mx-auto px-6 pt-12 pb-20 flex-1 w-full">
+        <div className="flex items-center justify-between mb-12">
+          <a href="/" className="flex items-center gap-2 text-sm font-normal text-slate-400 hover:text-lime-400 transition-colors">
+            <ArrowLeft size={16} strokeWidth={1.5} /> {lang === "fr" ? "Retour à l'accueil" : "Back to home"}
           </a>
           <div className="flex bg-slate-900 border border-slate-800 rounded-lg p-0.5 text-[10px] font-bold">
             <button className={`px-2 py-1 rounded ${lang === "fr" ? "bg-lime-400 text-slate-950" : "text-slate-400"}`} onClick={() => setLang("fr")}>FR</button>
@@ -37,7 +39,7 @@ export default function LegalPage({ type }: LegalPageProps) {
         <img src={logoFull} alt="Brigado" className="h-8 w-auto mb-8" />
         <h1 className="text-2xl font-extrabold mb-6">{title}</h1>
 
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 text-sm text-slate-400 leading-relaxed">
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 text-sm font-normal text-slate-400 leading-relaxed">
           <p>
             {lang === "fr"
               ? "Le contenu de cette page est en cours de rédaction et sera ajouté prochainement."

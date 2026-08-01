@@ -9,6 +9,8 @@ import Landing from "./components/Landing";
 import LegalPage from "./components/LegalPage";
 import ContactPage from "./components/ContactPage";
 import Features from "./components/Features";
+import RegisterPage from "./components/RegisterPage";
+import WelcomePage from "./components/WelcomePage";
 import { getSlugFromUrl, setRestaurantId } from "./firebase";
 import logoFull from "./assets/logo-full.png";
 import { Clock, Users, Sun, Moon } from "lucide-react";
@@ -16,12 +18,14 @@ import { Clock, Users, Sun, Moon } from "lucide-react";
 // Static marketing/legal pages live at these paths — never treated as a
 // restaurant slug, even though they're single top-level path segments
 // just like a slug would be.
-const STATIC_PAGES: Record<string, "mentions" | "cgv" | "privacy" | "contact" | "features"> = {
+const STATIC_PAGES: Record<string, "mentions" | "cgv" | "privacy" | "contact" | "features" | "register" | "welcome"> = {
   "mentions-legales": "mentions",
   "cgv": "cgv",
   "confidentialite": "privacy",
   "contact": "contact",
   "features": "features",
+  "register": "register",
+  "welcome": "welcome",
 };
 
 export default function App() {
@@ -103,6 +107,12 @@ export default function App() {
   }
   if (staticPage === "features") {
     return <Features />;
+  }
+  if (staticPage === "register") {
+    return <RegisterPage />;
+  }
+  if (staticPage === "welcome") {
+    return <WelcomePage />;
   }
   if (staticPage) {
     return <LegalPage type={staticPage} />;

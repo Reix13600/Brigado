@@ -6,6 +6,7 @@ import Footer from "./Footer";
 import MarketingBackground from "./MarketingBackground";
 import screenshotOverview from "../assets/screenshots/screenshot-overview.webp";
 import screenshotStaff from "../assets/screenshots/screenshot-staff.webp";
+import howItWorks from "../assets/how-it-works.webp";
 
 export default function Landing() {
   const [lang, setLang] = useState<LandingLang>("fr");
@@ -176,22 +177,36 @@ export default function Landing() {
           <h2 className="text-xl font-bold">{t("howTitle")}</h2>
           <div className="mx-auto mt-3 h-px w-16 bg-gradient-to-r from-transparent via-lime-400/60 to-transparent" />
         </div>
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
-          {[
-            [UserPlus, t("howStep1Title"), t("howStep1Sub")],
-            [QrCode, t("howStep2Title"), t("howStep2Sub")],
-            [Smartphone, t("howStep3Title"), t("howStep3Sub")],
-          ].map(([Icon, title, body]: any, i) => (
-            <div key={i} className="text-center">
-              <div className="w-12 h-12 rounded-full bg-slate-900 border border-slate-800 flex items-center justify-center mx-auto mb-3">
-                <Icon size={20} strokeWidth={1.5} className="text-lime-400" />
-              </div>
-              <div className="text-[10px] font-bold text-lime-500/70 mb-1">{String(i + 1).padStart(2, "0")}</div>
-              <h3 className="text-sm font-bold text-slate-100">{title}</h3>
-              <p className="text-xs font-normal text-slate-500 mt-1">{body}</p>
+        {lang === "fr" ? (
+          /* The illustration has French text baked in, so it's FR-only;
+             English visitors get the text-based steps below instead. */
+          <div className="max-w-3xl mx-auto">
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6">
+              <img
+                src={howItWorks}
+                alt="Trois étapes : configuration de l'équipe et affiche QR, pointage mobile sans application, suivi des heures et export pour votre comptable"
+                className="w-full h-auto rounded-lg"
+              />
             </div>
-          ))}
-        </div>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
+            {[
+              [UserPlus, t("howStep1Title"), t("howStep1Sub")],
+              [QrCode, t("howStep2Title"), t("howStep2Sub")],
+              [Smartphone, t("howStep3Title"), t("howStep3Sub")],
+            ].map(([Icon, title, body]: any, i) => (
+              <div key={i} className="text-center">
+                <div className="w-12 h-12 rounded-full bg-slate-900 border border-slate-800 flex items-center justify-center mx-auto mb-3">
+                  <Icon size={20} strokeWidth={1.5} className="text-lime-400" />
+                </div>
+                <div className="text-[10px] font-bold text-lime-500/70 mb-1">{String(i + 1).padStart(2, "0")}</div>
+                <h3 className="text-sm font-bold text-slate-100">{title}</h3>
+                <p className="text-xs font-normal text-slate-500 mt-1">{body}</p>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* PRICING TEASER + CTA */}

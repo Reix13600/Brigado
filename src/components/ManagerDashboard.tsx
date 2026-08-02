@@ -205,6 +205,12 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
   const [digestEnabled, setDigestEnabled] = useState<boolean>(false);
   const [digestSending, setDigestSending] = useState<boolean>(false);
   const [digestSentMsg, setDigestSentMsg] = useState<string>("");
+  // One-off digest send to a different address — deliberately separate
+  // state from digestEmail so it never touches the saved digest_email config.
+  const [digestAltOpen, setDigestAltOpen] = useState<boolean>(false);
+  const [digestAltEmail, setDigestAltEmail] = useState<string>("");
+  const [digestAltSending, setDigestAltSending] = useState<boolean>(false);
+  const [digestAltSentMsg, setDigestAltSentMsg] = useState<string>("");
   const [inviteEmail, setInviteEmail] = useState<string>("");
   const [inviteBusy, setInviteBusy] = useState<boolean>(false);
   const [inviteMsg, setInviteMsg] = useState<string>("");
@@ -627,6 +633,22 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
       setDigestSentMsg(lang === "fr" ? "Échec de l'envoi — la fonction est-elle déployée ?" : "Failed to send — is the function deployed yet?");
     } finally {
       setDigestSending(false);
+    }
+  };
+
+  const triggerSendDigestToAltEmail = async () => {
+    if (!digestAltEmail.trim()) return;
+    setDigestAltSending(true);
+    setDigestAltSentMsg("");
+    try {
+      const sendDigestNow = httpsCallable(functions, "sendDigestNow");
+      await sendDigestNow({ slug: getRestaurantId(), email: digestAltEmail.trim() });
+      setDigestAltSentMsg(lang === "fr" ? "Envoyé !" : "Sent!");
+    } catch (err) {
+      console.error(err);
+      setDigestAltSentMsg(lang === "fr" ? "Échec de l'envoi — la fonction est-elle déployée ?" : "Failed to send — is the function deployed yet?");
+    } finally {
+      setDigestAltSending(false);
     }
   };
 
@@ -4046,6 +4068,40 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                       </button>
                     </div>
                     {digestSentMsg && <p className="text-[10px] text-slate-500">{digestSentMsg}</p>}
+                    <button
+                      className="text-[11px] font-semibold text-lime-500/90 hover:text-lime-400 underline decoration-lime-500/40 hover:decoration-lime-400 underline-offset-2 transition-all"
+                      onClick={() => setDigestAltOpen(v => !v)}
+                    >
+                      {digestAltOpen
+                        ? (lang === "fr" ? "▾ Masquer l'envoi ponctuel" : "▾ Hide one-off send")
+                        : (lang === "fr" ? "▸ Envoyer à une autre adresse" : "▸ Send to a different email")}
+                    </button>
+                    {digestAltOpen && (
+                      <div className="pt-2 border-t border-slate-800/60 space-y-2">
+                        <div className="text-[10px] text-slate-400 font-medium">
+                          {lang === "fr"
+                            ? "Envoi unique — ne modifie pas l'adresse d'envoi automatique enregistrée ci-dessus."
+                            : "One-off send — does not change the saved auto-send address above."}
+                        </div>
+                        <div className="flex gap-2">
+                          <input
+                            type="email"
+                            className="flex-1 bg-slate-950 border border-slate-800 rounded-xl p-2 text-xs text-slate-200"
+                            placeholder={lang === "fr" ? "collegue@restaurant.com" : "colleague@restaurant.com"}
+                            value={digestAltEmail}
+                            onChange={e => setDigestAltEmail(e.target.value)}
+                          />
+                          <button
+                            className="px-3 py-2 bg-slate-800 hover:bg-slate-700 rounded-xl text-[10px] font-semibold disabled:opacity-50 whitespace-nowrap"
+                            onClick={triggerSendDigestToAltEmail}
+                            disabled={digestAltSending || !digestAltEmail.trim()}
+                          >
+                            {digestAltSending ? "..." : (lang === "fr" ? "Envoyer" : "Send")}
+                          </button>
+                        </div>
+                        {digestAltSentMsg && <p className="text-[10px] text-slate-500">{digestAltSentMsg}</p>}
+                      </div>
+                    )}
                   </>
                 )}
               </div>

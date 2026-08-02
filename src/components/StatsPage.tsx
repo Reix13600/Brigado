@@ -4,7 +4,7 @@ import {
   RadialBarChart, RadialBar, LineChart, Line,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
 } from "recharts";
-import { BarChart3, AlertTriangle, Flag, Gauge, ChevronLeft, ChevronRight, X } from "lucide-react";
+import { BarChart3, AlertTriangle, Flag, Gauge, ChevronLeft, ChevronRight, X, Mail, TrendingUp, TrendingDown, Minus, CalendarDays } from "lucide-react";
 import { AppData, RoleType, StaffMember } from "../types";
 import { getRoleColor } from "../utils/roleColors";
 import { saveWeekRevenue } from "../utils/api";
@@ -206,6 +206,86 @@ export default function StatsPage({ appData, lang, theme, onRefresh }: StatsPage
   const dateFmt = (d: Date) => d.toLocaleDateString(lang === "fr" ? "fr-FR" : "en-US", { day: "2-digit", month: "short" });
   const busiestWeekLabel = `${dateFmt(busiestWeekStart)} – ${dateFmt(busiestWeekEnd)}`;
 
+  // ── Weekly digest: always this week vs last week (Mon–Sun), regardless
+  // of the statsWeeks period selector that scopes the rest of the page ──
+  const thisWeekStart = mondayOf(new Date());
+  const thisWeekKey = toDateStr(thisWeekStart);
+  const lastWeekStart = new Date(thisWeekStart);
+  lastWeekStart.setDate(lastWeekStart.getDate() - 7);
+  const lastWeekKey = toDateStr(lastWeekStart);
+
+  let twHours = 0, lwHours = 0, twFlagged = 0, lwFlagged = 0;
+  const twRoleHours: Record<string, number> = {};
+  const lwRoleHours: Record<string, number> = {};
+  appData.entries.forEach(e => {
+    const key = weekKeyOf(e.date);
+    const isThisWeek = key === thisWeekKey;
+    const isLastWeek = key === lastWeekKey;
+    if (!isThisWeek && !isLastWeek) return;
+    if (e.flagged) {
+      if (isThisWeek) twFlagged += 1; else lwFlagged += 1;
+    }
+    if (e.status !== "approved" || e.type !== "worked") return;
+    const role = staffByName[e.name]?.role ?? "other";
+    if (isThisWeek) {
+      twHours += e.hours;
+      twRoleHours[role] = (twRoleHours[role] ?? 0) + e.hours;
+    } else {
+      lwHours += e.hours;
+      lwRoleHours[role] = (lwRoleHours[role] ?? 0) + e.hours;
+    }
+  });
+  const digestRoles = [...new Set([...Object.keys(twRoleHours), ...Object.keys(lwRoleHours)])]
+    .map(role => ({
+      role,
+      tw: Math.round((twRoleHours[role] ?? 0) * 10) / 10,
+      lw: Math.round((lwRoleHours[role] ?? 0) * 10) / 10,
+      color: getRoleColor(role as RoleType, theme),
+    }))
+    .sort((a, b) => b.tw - a.tw);
+  const digestRoleMax = Math.max(1, ...digestRoles.map(r => Math.max(r.tw, r.lw)));
+  const hoursDelta = twHours - lwHours;
+  const hoursDeltaPct = lwHours > 0 ? (hoursDelta / lwHours) * 100 : null;
+  const flaggedDelta = twFlagged - lwFlagged;
+  const thisWeekEnd = new Date(thisWeekStart);
+  thisWeekEnd.setDate(thisWeekStart.getDate() + 6);
+
+  // Direction chip: lime when the change is good news, amber/rose when not.
+  const DeltaChip = ({ delta, pct, upIsBad }: { delta: number; pct: number | null; upIsBad?: boolean }) => {
+    const up = delta > 0, flat = delta === 0;
+    const color = flat ? "text-slate-500 bg-slate-800/60"
+      : up === !upIsBad ? "text-lime-400 bg-lime-400/10"
+      : upIsBad && up ? "text-rose-400 bg-rose-400/10"
+      : "text-amber-400 bg-amber-400/10";
+    const Icon = flat ? Minus : up ? TrendingUp : TrendingDown;
+    return (
+      <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ${color}`}>
+        <Icon size={11} />
+        {delta > 0 ? "+" : ""}{Math.round(delta * 10) / 10}
+        {pct !== null && <span className="opacity-70">({pct > 0 ? "+" : ""}{pct.toFixed(0)}%)</span>}
+      </span>
+    );
+  };
+
+  // ── Top 5 busiest individual dates within the selected period ──
+  const dateAgg: Record<string, { hours: number; people: Set<string> }> = {};
+  approvedWorked.forEach(e => {
+    if (!dateAgg[e.date]) dateAgg[e.date] = { hours: 0, people: new Set() };
+    dateAgg[e.date].hours += e.hours;
+    dateAgg[e.date].people.add(e.name);
+  });
+  const busiestDates = Object.entries(dateAgg)
+    .map(([date, v]) => ({
+      date,
+      hours: Math.round(v.hours * 10) / 10,
+      headcount: v.people.size,
+      avg: v.people.size > 0 ? v.hours / v.people.size : 0,
+    }))
+    .sort((a, b) => b.hours - a.hours)
+    .slice(0, 5);
+  const busiestDateFmt = (dateStr: string) =>
+    new Date(dateStr + "T00:00:00").toLocaleDateString(lang === "fr" ? "fr-FR" : "en-US", { weekday: "short", day: "2-digit", month: "short" });
+
   // ── Absence rate ──
   const dayTypeEntries = inRange.filter(e => e.status === "approved" && (e.type === "worked" || e.type === "absent" || e.type === "sick"));
   const absenceEntries = dayTypeEntries.filter(e => e.type === "absent" || e.type === "sick");
@@ -288,6 +368,89 @@ export default function StatsPage({ appData, lang, theme, onRefresh }: StatsPage
               {w === 26 ? (lang === "fr" ? "6 mois" : "6 months") : `${w} ${lang === "fr" ? "sem." : "wks"}`}
             </button>
           ))}
+        </div>
+      </div>
+
+      {/* WEEKLY DIGEST — in-app mirror of the email digest: always this week
+          vs last week, deliberately unaffected by the period selector above */}
+      <div className="relative bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-lg overflow-hidden">
+        <div
+          className="pointer-events-none absolute inset-0 opacity-50"
+          style={{ background: "radial-gradient(ellipse 45% 90% at 8% 0%, rgba(163,230,53,0.10), transparent 70%)" }}
+        />
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 mb-4">
+          <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+            <Mail size={13} className="text-lime-400" /> {lang === "fr" ? "Résumé de la semaine" : "Weekly digest"}
+          </h3>
+          <span className="text-[10px] text-slate-500 font-mono">
+            {dateFmt(thisWeekStart)} – {dateFmt(thisWeekEnd)} · {lang === "fr" ? "vs semaine dernière" : "vs last week"}
+          </span>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="bg-slate-950/40 rounded-xl p-4 space-y-2">
+            <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+              {lang === "fr" ? "Heures travaillées" : "Hours worked"}
+            </div>
+            <div className="text-3xl font-mono font-bold text-slate-100"><CountUp value={twHours} decimals={1} suffix="h" /></div>
+            <DeltaChip delta={hoursDelta} pct={hoursDeltaPct} />
+            <div className="text-[10px] text-slate-600">
+              {lang === "fr" ? `Sem. dernière : ${Math.round(lwHours * 10) / 10}h` : `Last week: ${Math.round(lwHours * 10) / 10}h`}
+            </div>
+          </div>
+          <div className="bg-slate-950/40 rounded-xl p-4 space-y-2">
+            <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1">
+              <Flag size={10} className="text-rose-400" /> {lang === "fr" ? "Saisies signalées" : "Flagged entries"}
+            </div>
+            <div className={`text-3xl font-mono font-bold ${twFlagged > 0 ? "text-rose-400" : "text-slate-100"}`}><CountUp value={twFlagged} /></div>
+            <DeltaChip delta={flaggedDelta} pct={null} upIsBad />
+            <div className="text-[10px] text-slate-600">
+              {lang === "fr" ? `Sem. dernière : ${lwFlagged}` : `Last week: ${lwFlagged}`}
+            </div>
+          </div>
+          <div className="bg-slate-950/40 rounded-xl p-4">
+            <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">
+              {lang === "fr" ? "Par poste" : "By role"}
+            </div>
+            {digestRoles.length === 0 ? (
+              <p className="text-xs text-slate-500 italic py-3 text-center">
+                {lang === "fr" ? "Aucune heure approuvée sur ces deux semaines." : "No approved hours in either week yet."}
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {digestRoles.map(r => {
+                  const delta = Math.round((r.tw - r.lw) * 10) / 10;
+                  return (
+                    <div key={r.role}>
+                      <div className="flex items-center justify-between text-[10px] mb-0.5">
+                        <span className="flex items-center gap-1.5 text-slate-300">
+                          <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: r.color }} />
+                          {roleLabel(r.role as RoleType)}
+                        </span>
+                        <span className="font-mono text-slate-400">
+                          {r.lw}h → {r.tw}h{" "}
+                          <span className={delta === 0 ? "text-slate-500" : delta > 0 ? "text-lime-400" : "text-amber-400"}>
+                            {delta === 0 ? "＝" : delta > 0 ? `▲ +${delta}` : `▼ ${delta}`}
+                          </span>
+                        </span>
+                      </div>
+                      <div className="space-y-0.5">
+                        <div className="h-1 rounded-full bg-slate-800 overflow-hidden">
+                          <div className="h-full rounded-full bg-slate-600" style={{ width: `${(r.lw / digestRoleMax) * 100}%` }} />
+                        </div>
+                        <div className="h-1 rounded-full bg-slate-800 overflow-hidden">
+                          <div className="h-full rounded-full bg-gradient-to-r from-lime-500 to-lime-300" style={{ width: `${(r.tw / digestRoleMax) * 100}%` }} />
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+                <div className="flex items-center gap-3 pt-1 text-[9px] text-slate-600">
+                  <span className="flex items-center gap-1"><span className="w-3 h-1 rounded-full bg-slate-600 inline-block" /> {lang === "fr" ? "Sem. dernière" : "Last week"}</span>
+                  <span className="flex items-center gap-1"><span className="w-3 h-1 rounded-full bg-lime-400 inline-block" /> {lang === "fr" ? "Cette semaine" : "This week"}</span>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -511,29 +674,63 @@ export default function StatsPage({ appData, lang, theme, onRefresh }: StatsPage
             </div>
           </div>
 
-          {/* FLAGGED ENTRIES TREND — gradient area, matches the hours/cost look */}
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-lg">
-            <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider mb-1 flex items-center gap-1.5">
-              <Flag size={13} className="text-rose-400" /> {lang === "fr" ? "Tendance des heures signalées" : "Flagged entries trend"}
-            </h3>
-            <p className="text-[10px] text-slate-500 mb-4">
-              {lang === "fr" ? "Saisies soumises sans scan QR récent — signalé au manager uniquement." : "Entries submitted without a fresh QR scan — manager-only signal."}
-            </p>
-            <ResponsiveContainer width="100%" height={180}>
-              <AreaChart data={trendData}>
-                <defs>
-                  <linearGradient id="flaggedGradient" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#f43f5e" stopOpacity={0.5} />
-                    <stop offset="100%" stopColor="#f43f5e" stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke={chartGridColor} />
-                <XAxis dataKey="week" tick={{ fontSize: 10, fill: chartAxisColor }} />
-                <YAxis tick={{ fontSize: 10, fill: chartAxisColor }} allowDecimals={false} />
-                <Tooltip contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle} formatter={(v: number) => [v, lang === "fr" ? "Signalées" : "Flagged"]} />
-                <Area type="monotone" dataKey="flagged" stroke="#f43f5e" strokeWidth={2} fill="url(#flaggedGradient)" dot={{ r: 3, fill: "#f43f5e", strokeWidth: 0 }} />
-              </AreaChart>
-            </ResponsiveContainer>
+          {/* FLAGGED ENTRIES TREND + BUSIEST SPECIFIC DATES */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-lg">
+              <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider mb-1 flex items-center gap-1.5">
+                <Flag size={13} className="text-rose-400" /> {lang === "fr" ? "Tendance des heures signalées" : "Flagged entries trend"}
+              </h3>
+              <p className="text-[10px] text-slate-500 mb-4">
+                {lang === "fr" ? "Saisies soumises sans scan QR récent — signalé au manager uniquement." : "Entries submitted without a fresh QR scan — manager-only signal."}
+              </p>
+              <ResponsiveContainer width="100%" height={180}>
+                <AreaChart data={trendData}>
+                  <defs>
+                    <linearGradient id="flaggedGradient" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="#f43f5e" stopOpacity={0.5} />
+                      <stop offset="100%" stopColor="#f43f5e" stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke={chartGridColor} />
+                  <XAxis dataKey="week" tick={{ fontSize: 10, fill: chartAxisColor }} />
+                  <YAxis tick={{ fontSize: 10, fill: chartAxisColor }} allowDecimals={false} />
+                  <Tooltip contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle} formatter={(v: number) => [v, lang === "fr" ? "Signalées" : "Flagged"]} />
+                  <Area type="monotone" dataKey="flagged" stroke="#f43f5e" strokeWidth={2} fill="url(#flaggedGradient)" dot={{ r: 3, fill: "#f43f5e", strokeWidth: 0 }} />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-lg">
+              <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider mb-1 flex items-center gap-1.5">
+                <CalendarDays size={13} className="text-lime-400" /> {lang === "fr" ? "Dates les plus chargées" : "Busiest dates"}
+              </h3>
+              <p className="text-[10px] text-slate-500 mb-4">
+                {lang === "fr" ? "Top 5 des journées sur la période sélectionnée." : "Top 5 single days in the selected period."}
+              </p>
+              {busiestDates.length === 0 ? (
+                <p className="text-xs text-slate-500 italic py-4 text-center">
+                  {lang === "fr" ? "Aucune journée travaillée sur cette période." : "No worked days in this period."}
+                </p>
+              ) : (
+                <div className="space-y-1.5">
+                  {busiestDates.map((d, i) => (
+                    <div key={d.date} className="flex items-center justify-between text-xs bg-slate-950/40 rounded-lg px-3 py-2">
+                      <span className="flex items-center gap-2.5">
+                        <span className={`w-5 h-5 rounded-md flex items-center justify-center text-[10px] font-bold flex-shrink-0 ${i === 0 ? "bg-lime-400/15 text-lime-400" : "bg-slate-800 text-slate-500"}`}>
+                          {i + 1}
+                        </span>
+                        <span className="text-slate-300 capitalize">{busiestDateFmt(d.date)}</span>
+                      </span>
+                      <span className="font-mono text-[11px]">
+                        <span className="text-lime-400 font-bold">{d.hours}h</span>
+                        <span className="text-slate-500"> · {d.headcount} {lang === "fr" ? "pers." : "staff"}</span>
+                        <span className="text-slate-600"> · {d.avg.toFixed(1)}h/{lang === "fr" ? "pers." : "ea."}</span>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
 
           {/* LABOR COST AS % OF REVENUE — calendar-driven entry */}

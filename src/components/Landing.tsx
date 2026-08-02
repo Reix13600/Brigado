@@ -93,18 +93,16 @@ export default function Landing() {
 
       {/* HOW IT WORKS */}
       <div className="max-w-5xl mx-auto px-6 pb-20">
-        <div className="text-center mb-10">
-          <h2 className="text-xl font-bold">{t("howTitle")}</h2>
-          <div className="mx-auto mt-3 h-px w-16 bg-gradient-to-r from-transparent via-lime-400/60 to-transparent" />
-        </div>
         {lang === "fr" ? (
           /* The illustration has French text baked in, so it's FR-only;
-             English visitors get the text-based steps below instead. */
+             English visitors get the text-based steps below instead.
+             bg matches the artwork's own chalkboard black (#050607) so the
+             image blends into its frame without a visible seam. */
           <div className="max-w-3xl mx-auto">
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6">
+            <div className="bg-[#050607] border border-slate-800 rounded-2xl p-4 sm:p-6">
               <img
                 src={howItWorks}
-                alt="Trois étapes : configuration de l'équipe et affiche QR, pointage mobile sans application, suivi des heures et export pour votre comptable"
+                alt="Trois étapes : configuration de l'équipe et affiche QR à scanner, pointage mobile depuis le navigateur avec demandes de congé, suivi des heures et coûts exportables pour votre comptable"
                 className="w-full h-auto rounded-lg"
               />
             </div>

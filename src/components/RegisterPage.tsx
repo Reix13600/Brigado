@@ -210,10 +210,6 @@ export default function RegisterPage() {
               {submitting ? "..." : `${t("continueToPayment")} — ${plan === "monthly" ? `€39${lang === "fr" ? "/mois" : "/mo"}` : `€390${lang === "fr" ? "/an" : "/yr"}`}`}
             </button>
 
-            <p className="text-[10px] font-normal text-slate-600 text-center">
-              {t("alreadyRegistered")}{" "}
-              <a href={`/${effectiveSlug || ""}`} className="text-lime-400 underline">{t("goToRestaurant")}</a>
-            </p>
           </div>
         </div>
       </div>

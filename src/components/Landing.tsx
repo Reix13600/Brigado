@@ -4,6 +4,7 @@ import logoFull from "../assets/logo-full.png";
 import { L, LandingLang } from "../utils/landingCopy";
 import Footer from "./Footer";
 import MarketingBackground from "./MarketingBackground";
+import LoginModal from "./LoginModal";
 import screenshotOverview from "../assets/screenshots/screenshot-overview.webp";
 import screenshotStaff from "../assets/screenshots/screenshot-staff.webp";
 import howItWorks from "../assets/how-it-works.webp";
@@ -11,6 +12,7 @@ import howItWorks from "../assets/how-it-works.webp";
 export default function Landing() {
   const [lang, setLang] = useState<LandingLang>("fr");
   const [openFaq, setOpenFaq] = useState<number | null>(null);
+  const [showLogin, setShowLogin] = useState(false);
 
   const t = (key: Parameters<typeof L>[1]) => L(lang, key);
 
@@ -44,6 +46,12 @@ export default function Landing() {
             <a href="/features" className="hidden sm:block text-xs font-normal text-slate-400 hover:text-lime-400 transition-colors">
               {lang === "fr" ? "Fonctionnalités" : "Features"}
             </a>
+            <button
+              className="text-xs font-normal text-slate-400 hover:text-lime-400 transition-colors"
+              onClick={() => setShowLogin(true)}
+            >
+              {lang === "fr" ? "Se connecter" : "Log in"}
+            </button>
             <div className="flex bg-slate-900 border border-slate-800 rounded-lg p-0.5 text-[10px] font-bold">
               <button className={`px-2 py-1 rounded ${lang === "fr" ? "bg-lime-400 text-slate-950" : "text-slate-400"}`} onClick={() => setLang("fr")}>FR</button>
               <button className={`px-2 py-1 rounded ${lang === "en" ? "bg-lime-400 text-slate-950" : "text-slate-400"}`} onClick={() => setLang("en")}>EN</button>
@@ -251,6 +259,7 @@ export default function Landing() {
       </div>
 
       <Footer lang={lang} />
+      {showLogin && <LoginModal lang={lang} onClose={() => setShowLogin(false)} />}
     </div>
   );
 }

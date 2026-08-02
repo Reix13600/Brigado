@@ -6,12 +6,14 @@ import { LandingLang } from "../utils/landingCopy";
 import { FEATURE_CATEGORIES } from "../utils/featuresCopy";
 import Footer from "./Footer";
 import MarketingBackground from "./MarketingBackground";
+import LoginModal from "./LoginModal";
 import logoFull from "../assets/logo-full.png";
 
 const ICONS: Record<string, any> = { Clock, ShieldCheck, BarChart3, MessageSquare, Zap, Globe };
 
 export default function Features() {
   const [lang, setLang] = useState<LandingLang>("fr");
+  const [showLogin, setShowLogin] = useState(false);
 
   return (
     <div className="relative min-h-screen bg-slate-950 text-slate-100 font-sans">
@@ -24,6 +26,12 @@ export default function Features() {
             <img src={logoFull} alt="Brigado" className="h-6 w-auto" />
           </a>
           <div className="flex items-center gap-3">
+            <button
+              className="text-xs font-normal text-slate-400 hover:text-lime-400 transition-colors"
+              onClick={() => setShowLogin(true)}
+            >
+              {lang === "fr" ? "Se connecter" : "Log in"}
+            </button>
             <div className="flex bg-slate-900 border border-slate-800 rounded-lg p-0.5 text-[10px] font-bold">
               <button className={`px-2 py-1 rounded ${lang === "fr" ? "bg-lime-400 text-slate-950" : "text-slate-400"}`} onClick={() => setLang("fr")}>FR</button>
               <button className={`px-2 py-1 rounded ${lang === "en" ? "bg-lime-400 text-slate-950" : "text-slate-400"}`} onClick={() => setLang("en")}>EN</button>
@@ -87,6 +95,7 @@ export default function Features() {
       </div>
 
       <Footer lang={lang} />
+      {showLogin && <LoginModal lang={lang} onClose={() => setShowLogin(false)} />}
     </div>
   );
 }

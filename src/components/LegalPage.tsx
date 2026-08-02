@@ -3,6 +3,7 @@ import { ArrowLeft } from "lucide-react";
 import { LandingLang } from "../utils/landingCopy";
 import Footer from "./Footer";
 import MarketingBackground from "./MarketingBackground";
+import LoginModal from "./LoginModal";
 import logoFull from "../assets/logo-full.png";
 
 interface LegalPageProps {
@@ -20,6 +21,7 @@ const TITLES: Record<LegalPageProps["type"], { fr: string; en: string }> = {
 // later is a one-file edit, not a redesign.
 export default function LegalPage({ type }: LegalPageProps) {
   const [lang, setLang] = useState<LandingLang>("fr");
+  const [showLogin, setShowLogin] = useState(false);
   const title = TITLES[type][lang];
 
   return (
@@ -30,9 +32,17 @@ export default function LegalPage({ type }: LegalPageProps) {
           <a href="/" className="flex items-center gap-2 text-sm font-normal text-slate-400 hover:text-lime-400 transition-colors">
             <ArrowLeft size={16} strokeWidth={1.5} /> {lang === "fr" ? "Retour à l'accueil" : "Back to home"}
           </a>
-          <div className="flex bg-slate-900 border border-slate-800 rounded-lg p-0.5 text-[10px] font-bold">
-            <button className={`px-2 py-1 rounded ${lang === "fr" ? "bg-lime-400 text-slate-950" : "text-slate-400"}`} onClick={() => setLang("fr")}>FR</button>
-            <button className={`px-2 py-1 rounded ${lang === "en" ? "bg-lime-400 text-slate-950" : "text-slate-400"}`} onClick={() => setLang("en")}>EN</button>
+          <div className="flex items-center gap-3">
+            <button
+              className="text-xs font-normal text-slate-400 hover:text-lime-400 transition-colors"
+              onClick={() => setShowLogin(true)}
+            >
+              {lang === "fr" ? "Se connecter" : "Log in"}
+            </button>
+            <div className="flex bg-slate-900 border border-slate-800 rounded-lg p-0.5 text-[10px] font-bold">
+              <button className={`px-2 py-1 rounded ${lang === "fr" ? "bg-lime-400 text-slate-950" : "text-slate-400"}`} onClick={() => setLang("fr")}>FR</button>
+              <button className={`px-2 py-1 rounded ${lang === "en" ? "bg-lime-400 text-slate-950" : "text-slate-400"}`} onClick={() => setLang("en")}>EN</button>
+            </div>
           </div>
         </div>
 
@@ -54,6 +64,7 @@ export default function LegalPage({ type }: LegalPageProps) {
         </div>
       </div>
       <Footer lang={lang} />
+      {showLogin && <LoginModal lang={lang} onClose={() => setShowLogin(false)} />}
     </div>
   );
 }

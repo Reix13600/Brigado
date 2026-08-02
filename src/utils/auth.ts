@@ -53,6 +53,18 @@ export async function isAuthorizedManager(uid: string): Promise<boolean> {
   return snap.data().restaurantId === getRestaurantId();
 }
 
+/**
+ * Looks up which restaurant (if any) this uid manages — unlike
+ * isAuthorizedManager, this has no dependency on a currently-set
+ * restaurant context, so it works from the public marketing pages
+ * where no /{slug} has been resolved yet.
+ */
+export async function getManagerRestaurantId(uid: string): Promise<string | null> {
+  const snap = await getDoc(doc(db, "managers", uid));
+  if (!snap.exists()) return null;
+  return snap.data().restaurantId ?? null;
+}
+
 export function watchAuthState(callback: (user: User | null) => void) {
   return onAuthStateChanged(auth, callback);
 }

@@ -91,14 +91,52 @@ export default function Landing() {
         </div>
       </div>
 
+      {/* HOW IT WORKS */}
+      <div className="max-w-5xl mx-auto px-6 pb-20">
+        <div className="text-center mb-10">
+          <h2 className="text-xl font-bold">{t("howTitle")}</h2>
+          <div className="mx-auto mt-3 h-px w-16 bg-gradient-to-r from-transparent via-lime-400/60 to-transparent" />
+        </div>
+        {lang === "fr" ? (
+          /* The illustration has French text baked in, so it's FR-only;
+             English visitors get the text-based steps below instead. */
+          <div className="max-w-3xl mx-auto">
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6">
+              <img
+                src={howItWorks}
+                alt="Trois étapes : configuration de l'équipe et affiche QR, pointage mobile sans application, suivi des heures et export pour votre comptable"
+                className="w-full h-auto rounded-lg"
+              />
+            </div>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
+            {[
+              [UserPlus, t("howStep1Title"), t("howStep1Sub")],
+              [QrCode, t("howStep2Title"), t("howStep2Sub")],
+              [Smartphone, t("howStep3Title"), t("howStep3Sub")],
+            ].map(([Icon, title, body]: any, i) => (
+              <div key={i} className="text-center">
+                <div className="w-12 h-12 rounded-full bg-slate-900 border border-slate-800 flex items-center justify-center mx-auto mb-3">
+                  <Icon size={20} strokeWidth={1.5} className="text-lime-400" />
+                </div>
+                <div className="text-[10px] font-bold text-lime-500/70 mb-1">{String(i + 1).padStart(2, "0")}</div>
+                <h3 className="text-sm font-bold text-slate-100">{title}</h3>
+                <p className="text-xs font-normal text-slate-500 mt-1">{body}</p>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       {/* FEATURES */}
       <div className="max-w-5xl mx-auto px-6 grid grid-cols-1 sm:grid-cols-3 gap-4 pb-20">
         {features.map(([Icon, title, body], i) => (
           <div
             key={i}
-            className="bg-slate-900 border border-slate-800 rounded-2xl p-5 transition-all hover:border-lime-400/30 hover:shadow-lg hover:shadow-lime-400/[0.05]"
+            className="bg-slate-900 border border-slate-800 rounded-2xl p-5"
           >
-            <Icon size={20} strokeWidth={1.5} className="text-lime-400 mb-2" />
+            <Icon size={20} strokeWidth={1.5} className="text-lime-400 mb-2 drop-shadow-[0_0_6px_rgba(163,230,53,0.45)]" />
             <h3 className="text-sm font-bold text-slate-100">{title}</h3>
             <p className="text-xs font-normal text-slate-500 mt-1">{body}</p>
           </div>
@@ -169,44 +207,6 @@ export default function Landing() {
             <p className="text-sm font-normal text-slate-400 leading-relaxed">{t("complianceBody")}</p>
           </div>
         </div>
-      </div>
-
-      {/* HOW IT WORKS */}
-      <div className="max-w-5xl mx-auto px-6 pb-20">
-        <div className="text-center mb-10">
-          <h2 className="text-xl font-bold">{t("howTitle")}</h2>
-          <div className="mx-auto mt-3 h-px w-16 bg-gradient-to-r from-transparent via-lime-400/60 to-transparent" />
-        </div>
-        {lang === "fr" ? (
-          /* The illustration has French text baked in, so it's FR-only;
-             English visitors get the text-based steps below instead. */
-          <div className="max-w-3xl mx-auto">
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6">
-              <img
-                src={howItWorks}
-                alt="Trois étapes : configuration de l'équipe et affiche QR, pointage mobile sans application, suivi des heures et export pour votre comptable"
-                className="w-full h-auto rounded-lg"
-              />
-            </div>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
-            {[
-              [UserPlus, t("howStep1Title"), t("howStep1Sub")],
-              [QrCode, t("howStep2Title"), t("howStep2Sub")],
-              [Smartphone, t("howStep3Title"), t("howStep3Sub")],
-            ].map(([Icon, title, body]: any, i) => (
-              <div key={i} className="text-center">
-                <div className="w-12 h-12 rounded-full bg-slate-900 border border-slate-800 flex items-center justify-center mx-auto mb-3">
-                  <Icon size={20} strokeWidth={1.5} className="text-lime-400" />
-                </div>
-                <div className="text-[10px] font-bold text-lime-500/70 mb-1">{String(i + 1).padStart(2, "0")}</div>
-                <h3 className="text-sm font-bold text-slate-100">{title}</h3>
-                <p className="text-xs font-normal text-slate-500 mt-1">{body}</p>
-              </div>
-            ))}
-          </div>
-        )}
       </div>
 
       {/* PRICING TEASER + CTA */}

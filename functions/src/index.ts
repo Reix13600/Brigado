@@ -16,10 +16,14 @@ const auth = getAuth();
 //   firebase functions:secrets:set STRIPE_SECRET_KEY
 //   firebase functions:secrets:set STRIPE_WEBHOOK_SECRET
 //   firebase functions:secrets:set RESEND_API_KEY
+//   firebase functions:secrets:set BREVO_API_KEY
 // Never put the actual values in this file or anywhere in the repo.
 const stripeSecretKey = defineSecret("STRIPE_SECRET_KEY");
 const stripeWebhookSecret = defineSecret("STRIPE_WEBHOOK_SECRET");
 const resendApiKey = defineSecret("RESEND_API_KEY");
+// Not bound to any function yet — add to a function's `secrets: [...]` array
+// when Brevo automation lands. Exported so future function files can reuse it.
+export const brevoApiKey = defineSecret("BREVO_API_KEY");
 
 const DEFAULT_CONFIG = {
   resto_name: "",

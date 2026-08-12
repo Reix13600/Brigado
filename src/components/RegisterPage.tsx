@@ -31,6 +31,7 @@ export default function RegisterPage() {
   const [email, setEmail] = useState("");
   const [contactName, setContactName] = useState("");
   const [phone, setPhone] = useState("");
+  const [city, setCity] = useState("");
   const [postcode, setPostcode] = useState("");
   const [checking, setChecking] = useState(false);
   const [slugStatus, setSlugStatus] = useState<"idle" | "available" | "taken" | "invalid">("idle");
@@ -60,12 +61,15 @@ export default function RegisterPage() {
   };
 
   const handleContinueToPayment = async () => {
-    if (slugStatus !== "available" || !email.trim() || !restaurantName.trim() || !contactName.trim() || !phone.trim()) return;
+    if (slugStatus !== "available" || !email.trim() || !restaurantName.trim() || !contactName.trim() || !phone.trim() || !city.trim()) return;
     setSubmitting(true);
     try {
       const url = new URL(STRIPE_PAYMENT_LINKS[plan]);
       url.searchParams.set("prefilled_email", email.trim());
-      const ref = [effectiveSlug, restaurantName.trim(), contactName.trim(), phone.trim(), postcode.trim()]
+      // Pipe format v3: slug|name|contactName|phone|postcode|city|lang.
+      // The webhook parser accepts shorter (older) variants, so in-flight
+      // checkout links from before this change still provision fine.
+      const ref = [effectiveSlug, restaurantName.trim(), contactName.trim(), phone.trim(), postcode.trim(), city.trim(), lang]
         .map(encodeURIComponent)
         .join("|");
       url.searchParams.set("client_reference_id", ref);
@@ -192,20 +196,30 @@ export default function RegisterPage() {
                 />
               </div>
               <div>
-                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">{t("postcodeLabel")}</label>
+                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">{t("cityLabel")}</label>
                 <input
                   className="w-full mt-1 bg-slate-950/60 border border-slate-800 rounded-xl p-2.5 text-sm focus:outline-none focus:border-lime-400/50"
-                  placeholder="13600"
-                  value={postcode}
-                  onChange={e => setPostcode(e.target.value)}
+                  placeholder={lang === "fr" ? "La Ciotat" : "Marseille"}
+                  value={city}
+                  onChange={e => setCity(e.target.value)}
                 />
               </div>
+            </div>
+
+            <div>
+              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">{t("postcodeLabel")}</label>
+              <input
+                className="w-full mt-1 bg-slate-950/60 border border-slate-800 rounded-xl p-2.5 text-sm focus:outline-none focus:border-lime-400/50"
+                placeholder="13600"
+                value={postcode}
+                onChange={e => setPostcode(e.target.value)}
+              />
             </div>
 
             <button
               className="w-full py-3 bg-lime-400 text-slate-950 font-bold rounded-xl hover:bg-lime-300 transition-all disabled:opacity-40"
               onClick={handleContinueToPayment}
-              disabled={slugStatus !== "available" || !email.trim() || !restaurantName.trim() || !contactName.trim() || !phone.trim() || submitting}
+              disabled={slugStatus !== "available" || !email.trim() || !restaurantName.trim() || !contactName.trim() || !phone.trim() || !city.trim() || submitting}
             >
               {submitting ? "..." : `${t("continueToPayment")} — ${plan === "monthly" ? `€39${lang === "fr" ? "/mois" : "/mo"}` : `€390${lang === "fr" ? "/an" : "/yr"}`}`}
             </button>

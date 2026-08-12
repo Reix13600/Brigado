@@ -188,6 +188,13 @@ export interface AppData {
   // Set true by the Stripe webhook when a subscription is cancelled.
   // Soft-suspend, not deletion — data stays intact.
   suspended?: boolean;
+  // Single source of truth for access blocking, written only by the
+  // Stripe webhook functions. "trial_expired" = the trial ended without
+  // ever converting to paid; the app must show the blocked screen and
+  // nothing else. Data is retained 30 days from trialExpiredAt, then
+  // permanently deleted by the purgeExpiredTrials scheduled function.
+  subscriptionStatus?: "active" | "trial_expired";
+  trialExpiredAt?: string; // ISO, set when subscriptionStatus flips to trial_expired
   // All manager email addresses for this restaurant — lets the Settings
   // UI list/invite/remove managers without needing a Firestore query
   // capability the security rules don't otherwise allow.

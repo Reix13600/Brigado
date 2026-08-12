@@ -1,17 +1,19 @@
 import React, { useState, useEffect } from "react";
+import { doc, onSnapshot } from "firebase/firestore";
 import { AppData } from "./types";
 import { fetchAppData } from "./utils/api";
 import { ensureAnonymousSession } from "./utils/auth";
 import { getTranslation, LangType } from "./utils/translations";
 import StaffDashboard from "./components/StaffDashboard";
 import ManagerDashboard from "./components/ManagerDashboard";
+import TrialExpiredScreen from "./components/TrialExpiredScreen";
 import Landing from "./components/Landing";
 import LegalPage from "./components/LegalPage";
 import ContactPage from "./components/ContactPage";
 import Features from "./components/Features";
 import RegisterPage from "./components/RegisterPage";
 import WelcomePage from "./components/WelcomePage";
-import { getSlugFromUrl, setRestaurantId } from "./firebase";
+import { db, getSlugFromUrl, setRestaurantId } from "./firebase";
 import logoFull from "./assets/logo-full.png";
 import { Clock, Users, Sun, Moon } from "lucide-react";
 
@@ -63,6 +65,38 @@ export default function App() {
   const triggerRefresh = () => {
     setRefreshTrigger(prev => prev + 1);
   };
+
+  // Live watch on the tenant doc's billing fields. This is what makes
+  // the trial-expired block un-bypassable by a cached session: the
+  // moment the Stripe webhook flips subscriptionStatus, every open tab
+  // switches to the blocked screen without waiting for a reload — and
+  // every fresh load re-reads it before any dashboard (staff PIN pad or
+  // manager login) can mount. Reactivation flips it back just as live.
+  const [liveSub, setLiveSub] = useState<Pick<AppData, "subscriptionStatus" | "trialExpiredAt" | "suspended"> | null>(null);
+  useEffect(() => {
+    if (!restaurantSlug) return;
+    let unsubscribe: (() => void) | undefined;
+    let cancelled = false;
+    // The listener needs an auth session (security rules reject
+    // unauthenticated reads), so wait for the anonymous sign-in first.
+    ensureAnonymousSession().then(() => {
+      if (cancelled) return;
+      unsubscribe = onSnapshot(
+        doc(db, "restaurants", restaurantSlug),
+        snap => {
+          if (!snap.exists()) return;
+          const d = snap.data();
+          setLiveSub({
+            subscriptionStatus: d.subscriptionStatus,
+            trialExpiredAt: d.trialExpiredAt,
+            suspended: d.suspended === true,
+          });
+        },
+        err => console.error("Subscription status watch failed:", err)
+      );
+    });
+    return () => { cancelled = true; unsubscribe?.(); };
+  }, [restaurantSlug]);
 
   useEffect(() => {
     // Load active language from localStorage if available
@@ -159,12 +193,34 @@ export default function App() {
     );
   }
 
-  if (appData.suspended) {
+  // The live listener wins over the one-shot fetch once it has fired —
+  // it is strictly fresher. Until then, the fetched values gate.
+  const subscriptionStatus = liveSub ? liveSub.subscriptionStatus : appData.subscriptionStatus;
+  const trialExpiredAt = liveSub ? liveSub.trialExpiredAt : appData.trialExpiredAt;
+  const suspended = liveSub ? liveSub.suspended : appData.suspended;
+
+  if (subscriptionStatus === "trial_expired") {
+    return (
+      <TrialExpiredScreen
+        slug={restaurantSlug}
+        trialExpiredAt={trialExpiredAt}
+        lang={lang}
+        setLang={handleSetLang}
+        theme={theme}
+      />
+    );
+  }
+
+  // Legacy soft-suspend flag — only reachable for docs suspended before
+  // subscriptionStatus existed. New expirations always take the branch above.
+  if (suspended) {
     return (
       <div className={`min-h-screen flex flex-col items-center justify-center p-4 text-center space-y-4 ${theme === "light" ? "theme-light bg-slate-50 text-slate-900" : "bg-slate-950 text-slate-100"}`}>
         <div className="text-4xl">⏸️</div>
         <p className="text-sm text-slate-400 max-w-sm">
-          This restaurant's subscription is currently inactive. Your data is safe — contact support to reactivate.
+          {lang === "fr"
+            ? "L'abonnement de ce restaurant est inactif. Vos données sont en sécurité — contactez info@brigado.solutions pour réactiver."
+            : "This restaurant's subscription is currently inactive. Your data is safe — contact info@brigado.solutions to reactivate."}
         </p>
       </div>
     );

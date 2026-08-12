@@ -100,16 +100,31 @@ export async function fetchAppData(): Promise<AppData> {
   }
 
   const restoData = restoSnap.data();
-  const [entries, advances, scheduledShifts, activeClockIns, announcements, messages, timeOffRequests, swapRequests] = await Promise.all([
-    getAllEntries(),
-    getAllAdvances(),
-    getAllScheduledShifts(),
-    getAllActiveClockIns(),
-    getAllAnnouncements(),
-    getAllMessages(),
-    getAllTimeOffRequests(),
-    getAllSwapRequests(),
-  ]);
+
+  // A blocked tenant's subcollections are denied by security rules, so
+  // fetching them here would reject the Promise.all below and surface as
+  // the generic "failed to load" error screen — which renders BEFORE the
+  // trial-expired branch in App.tsx and would therefore hide the block
+  // screen (and with it the reactivation sign-in) behind a dead end.
+  // The blocked screen reads none of this data, so skip it entirely.
+  // Note this keys off the same field the rules do, so the two can't
+  // disagree: if the rules deny, this is already returning empties.
+  const blocked = restoData.subscriptionStatus === "trial_expired";
+  const [entries, advances, scheduledShifts, activeClockIns, announcements, messages, timeOffRequests, swapRequests] = blocked
+    ? [[], [], [], [], [], [], [], []] as [
+        HourEntry[], CashAdvance[], ScheduledShift[], ActiveClockIn[],
+        Announcement[], PrivateMessage[], TimeOffRequest[], SwapRequest[],
+      ]
+    : await Promise.all([
+        getAllEntries(),
+        getAllAdvances(),
+        getAllScheduledShifts(),
+        getAllActiveClockIns(),
+        getAllAnnouncements(),
+        getAllMessages(),
+        getAllTimeOffRequests(),
+        getAllSwapRequests(),
+      ]);
 
   return {
     config: { ...DEFAULT_CONFIG, ...restoData.config },
@@ -126,6 +141,8 @@ export async function fetchAppData(): Promise<AppData> {
     timeOffRequests,
     swapRequests,
     suspended: restoData.suspended === true,
+    subscriptionStatus: restoData.subscriptionStatus,
+    trialExpiredAt: restoData.trialExpiredAt,
     managerEmails: restoData.managerEmails ?? [],
   };
 }

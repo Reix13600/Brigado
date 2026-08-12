@@ -8,6 +8,13 @@ service cloud.firestore {
     // Only readable by the manager's own doc (no directory browsing) and
     // never writable from the client — managers are added via the Admin
     // SDK seed script, not through the app.
+    //
+    // Deliberately NOT gated on subscriptionStatus: TrialExpiredScreen
+    // reads this doc (isAuthorizedManager) to verify the signed-in user
+    // before opening the Stripe billing portal. Blocking it here would
+    // break the only path an expired tenant has to pay and come back,
+    // while protecting nothing — the doc holds no tenant data, and a uid
+    // can only ever read its own.
     match /managers/{uid} {
       allow read: if request.auth != null && request.auth.uid == uid;
       allow write: if false;
@@ -26,37 +33,62 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    // Server-side mirror of the App.tsx trial-expiry gate. Until this
+    // existed, blocking was UI-only: anyone with the slug and an
+    // anonymous session could still read and write a blocked tenant's
+    // data straight through the SDK.
+    //
+    // Reads subscriptionStatus off the PARENT restaurant doc, which is
+    // written only by the Stripe webhook (Admin SDK — rules do not apply
+    // to it, so reactivation and the day-30 purge are unaffected).
+    //
+    // `.get('subscriptionStatus', '')` defaults a MISSING field to
+    // not-blocked on purpose: tenants provisioned before the field
+    // existed must keep working exactly as before. Only the explicit
+    // string "trial_expired" ever blocks.
+    function tenantBlocked(restaurantId) {
+      return get(/databases/$(database)/documents/restaurants/$(restaurantId))
+               .data.get('subscriptionStatus', '') == 'trial_expired';
+    }
+
     match /restaurants/{restaurantId} {
+      // The tenant doc itself stays READABLE while blocked — this is the
+      // doc App.tsx fetches and live-watches to discover it is blocked in
+      // the first place. Denying it would replace the explanatory block
+      // screen with a generic connection error and strand the customer.
       allow read: if isSignedIn();
-      // config/staff/dayNotes/weekNotes live on this doc — manager-only.
-      allow write: if isManagerOf(restaurantId);
+      // config/staff/dayNotes/weekNotes live on this doc — manager-only,
+      // and frozen entirely once the trial has expired.
+      allow write: if isManagerOf(restaurantId) && !tenantBlocked(restaurantId);
 
       match /entries/{entryId} {
-        allow read: if isSignedIn();
+        allow read: if isSignedIn() && !tenantBlocked(restaurantId);
         // Staff can log their own hours (new doc, status must start
         // pending/correction — never self-approve) or edit their own
         // pending/correction rows. Managers can do anything, including
         // approvals.
-        allow create: if isSignedIn() && (
+        allow create: if isSignedIn() && !tenantBlocked(restaurantId) && (
           isManagerOf(restaurantId) ||
           (request.resource.data.status in ['pending', 'correction'])
         );
-        allow update: if isManagerOf(restaurantId) || (
-          isSignedIn() &&
-          resource.data.status in ['pending', 'correction'] &&
-          request.resource.data.name == resource.data.name
+        allow update: if !tenantBlocked(restaurantId) && (
+          isManagerOf(restaurantId) || (
+            isSignedIn() &&
+            resource.data.status in ['pending', 'correction'] &&
+            request.resource.data.name == resource.data.name
+          )
         );
-        allow delete: if isManagerOf(restaurantId);
+        allow delete: if isManagerOf(restaurantId) && !tenantBlocked(restaurantId);
       }
 
       match /advances/{advanceId} {
-        allow read: if isSignedIn();
-        allow write: if isManagerOf(restaurantId);
+        allow read: if isSignedIn() && !tenantBlocked(restaurantId);
+        allow write: if isManagerOf(restaurantId) && !tenantBlocked(restaurantId);
       }
 
       match /scheduledShifts/{shiftId} {
-        allow read: if isSignedIn();
-        allow write: if isManagerOf(restaurantId);
+        allow read: if isSignedIn() && !tenantBlocked(restaurantId);
+        allow write: if isManagerOf(restaurantId) && !tenantBlocked(restaurantId);
       }
 
       // Live clock-in state. Same trust model as `entries`: identity is
@@ -64,27 +96,27 @@ service cloud.firestore {
       // are anonymous), so any signed-in visitor may write here — the app
       // itself only lets a PIN-unlocked staff member act as themselves.
       match /activeClockIns/{staffName} {
-        allow read: if isSignedIn();
-        allow write: if isSignedIn();
+        allow read: if isSignedIn() && !tenantBlocked(restaurantId);
+        allow write: if isSignedIn() && !tenantBlocked(restaurantId);
       }
 
       // Phase 3: messaging, time-off requests, open cover-swap requests.
       // Same trust model as above throughout.
       match /announcements/{id} {
-        allow read: if isSignedIn();
-        allow write: if isManagerOf(restaurantId);
+        allow read: if isSignedIn() && !tenantBlocked(restaurantId);
+        allow write: if isManagerOf(restaurantId) && !tenantBlocked(restaurantId);
       }
       match /messages/{id} {
-        allow read: if isSignedIn();
-        allow write: if isSignedIn();
+        allow read: if isSignedIn() && !tenantBlocked(restaurantId);
+        allow write: if isSignedIn() && !tenantBlocked(restaurantId);
       }
       match /timeOffRequests/{id} {
-        allow read: if isSignedIn();
-        allow write: if isSignedIn();
+        allow read: if isSignedIn() && !tenantBlocked(restaurantId);
+        allow write: if isSignedIn() && !tenantBlocked(restaurantId);
       }
       match /swapRequests/{id} {
-        allow read: if isSignedIn();
-        allow write: if isSignedIn();
+        allow read: if isSignedIn() && !tenantBlocked(restaurantId);
+        allow write: if isSignedIn() && !tenantBlocked(restaurantId);
       }
     }
   }

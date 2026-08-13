@@ -7,7 +7,7 @@ import MarketingBackground from "./MarketingBackground";
 import LoginModal from "./LoginModal";
 import screenshotOverview from "../assets/screenshots/screenshot-overview.webp";
 import screenshotStaff from "../assets/screenshots/screenshot-staff.webp";
-import howItWorks from "../assets/how-it-works.webp";
+import HowItWorksVideo from "./HowItWorksVideo";
 
 export default function Landing() {
   const [lang, setLang] = useState<LandingLang>("fr");
@@ -102,17 +102,14 @@ export default function Landing() {
       {/* HOW IT WORKS */}
       <div className="max-w-5xl mx-auto px-6 pb-20">
         {lang === "fr" ? (
-          /* The illustration has French text baked in, so it's FR-only;
+          /* The explainer video has French text baked into the artwork, so
+             it's FR-only exactly as the static illustration it replaced was;
              English visitors get the text-based steps below instead.
-             bg matches the artwork's own chalkboard black (#050607) so the
-             image blends into its frame without a visible seam. */
+             bg matches the video's own chalkboard edge (#01121c) so the
+             frame blends into it without a visible seam. */
           <div className="max-w-3xl mx-auto">
-            <div className="bg-[#050607] border border-slate-800 rounded-2xl p-4 sm:p-6">
-              <img
-                src={howItWorks}
-                alt="Trois étapes : configuration de l'équipe et affiche QR à scanner, pointage mobile depuis le navigateur avec demandes de congé, suivi des heures et coûts exportables pour votre comptable"
-                className="w-full h-auto rounded-lg"
-              />
+            <div className="bg-[#01121c] border border-slate-800 rounded-2xl p-4 sm:p-6">
+              <HowItWorksVideo />
             </div>
           </div>
         ) : (

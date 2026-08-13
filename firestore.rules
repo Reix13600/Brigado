@@ -75,6 +75,14 @@ service cloud.firestore {
     // they have full access, exactly like "active". When a comped period
     // runs out the scheduled job flips them to "trial_expired", and that
     // is what blocks them — the comped status itself never does.
+    //
+    // ⚠️ MIRRORED in src/utils/tenantStatus.ts's BLOCKING_STATUSES.
+    // Rules cannot import that file, so this list is kept in sync BY
+    // HAND — if you add a status to one, add it to the other. This
+    // duplication is exactly what caused a real bug (see that file's own
+    // comment): add a status here without also updating the client-side
+    // list, and a blocked tenant's data fetch throws instead of showing
+    // the right screen.
     function tenantBlocked(restaurantId) {
       return get(/databases/$(database)/documents/restaurants/$(restaurantId))
                .data.get('subscriptionStatus', '') in ['trial_expired', 'paused'];

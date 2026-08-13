@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { doc, onSnapshot, updateDoc } from "firebase/firestore";
 import { AppData } from "./types";
 import { fetchAppData } from "./utils/api";
+import { isBlockedStatus } from "./utils/tenantStatus";
 import { ensureAnonymousSession } from "./utils/auth";
 import { getTranslation, LangType } from "./utils/translations";
 import StaffDashboard from "./components/StaffDashboard";
@@ -158,7 +159,7 @@ export default function App() {
     if (!restaurantSlug || !appData) return;
     // Blocked tenants are denied this write by the rules anyway, and a
     // blocked tenant isn't "active" in any meaningful sense.
-    if (appData.subscriptionStatus === "trial_expired" || appData.subscriptionStatus === "paused") return;
+    if (isBlockedStatus(appData.subscriptionStatus)) return;
 
     const lastMs = Date.parse(appData.lastActiveAt || "");
     const isStale = isNaN(lastMs) || Date.now() - lastMs > ACTIVITY_HEARTBEAT_MS;
@@ -239,6 +240,12 @@ export default function App() {
   const trialExpiredAt = liveSub ? liveSub.trialExpiredAt : appData.trialExpiredAt;
   const suspended = liveSub ? liveSub.suspended : appData.suspended;
 
+  // The two branches below deliberately check each status BY NAME rather
+  // than calling isBlockedStatus() — they need to know WHICH blocking
+  // status this is, to choose the right screen, not just whether it's
+  // blocked at all. If a third blocking status is ever added, it needs
+  // its own branch here (and its own screen) — isBlockedStatus() guards
+  // the boolean skip-logic elsewhere, not this dispatch.
   if (subscriptionStatus === "trial_expired") {
     return (
       <TrialExpiredScreen

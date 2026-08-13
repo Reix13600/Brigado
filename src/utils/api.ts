@@ -4,6 +4,7 @@ import {
 } from "firebase/firestore";
 import { db, getRestaurantId } from "../firebase";
 import { defaultComplianceRules } from "./compliance";
+import { isBlockedStatus } from "./tenantStatus";
 import {
   AppData, GeneralConfig, StaffMember, HourEntry, CashAdvance, ScheduledShift, ActiveClockIn, Shift,
   Announcement, PrivateMessage, TimeOffRequest, SwapRequest,
@@ -107,9 +108,10 @@ export async function fetchAppData(): Promise<AppData> {
   // trial-expired/paused branches in App.tsx and would therefore hide the
   // block screen (and with it the reactivation sign-in / paused notice)
   // behind a dead end. The blocked screens read none of this data, so
-  // skip it entirely. Must match firestore.rules' tenantBlocked() exactly
-  // (trial_expired OR paused) — if the two disagree, this list is stale.
-  const blocked = restoData.subscriptionStatus === "trial_expired" || restoData.subscriptionStatus === "paused";
+  // skip it entirely. isBlockedStatus() is the single source of truth for
+  // this — see its own comment for why (a real bug shipped from this
+  // exact check being duplicated by hand and only one copy updated).
+  const blocked = isBlockedStatus(restoData.subscriptionStatus);
   const [entries, advances, scheduledShifts, activeClockIns, announcements, messages, timeOffRequests, swapRequests] = blocked
     ? [[], [], [], [], [], [], [], []] as [
         HourEntry[], CashAdvance[], ScheduledShift[], ActiveClockIn[],

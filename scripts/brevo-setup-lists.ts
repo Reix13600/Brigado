@@ -40,6 +40,8 @@ const ATTRIBUTES = [
   { name: "REACTIVATION_URL", type: "text" },
   { name: "LANG", type: "text" },
   { name: "SUBSCRIPTION_STATUS", type: "text" },
+  // "paid" (normal Stripe checkout) vs "comped" (bonus-code signup).
+  { name: "SIGNUP_TYPE", type: "text" },
 ] as const;
 
 async function ensureAttributes(): Promise<void> {

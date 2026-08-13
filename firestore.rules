@@ -20,6 +20,25 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // Platform admin registry and the bonus-code system are FULLY closed
+    // to client access — no reads, no writes, ever. Everything that
+    // touches them goes through admin-checked callable functions using
+    // the Admin SDK, which bypasses these rules.
+    //
+    // Locking reads matters as much as writes here: platformAdmins would
+    // otherwise be an enumerable list of privileged accounts, and
+    // bonusCodes would let anyone read unredeemed codes straight out of
+    // the database and claim free accounts.
+    match /platformAdmins/{email} {
+      allow read, write: if false;
+    }
+    match /bonusCodes/{code} {
+      allow read, write: if false;
+      match /redemptions/{slug} {
+        allow read, write: if false;
+      }
+    }
+
     function isManagerOf(restaurantId) {
       return request.auth != null
         && exists(/databases/$(database)/documents/managers/$(request.auth.uid))
@@ -44,11 +63,21 @@ service cloud.firestore {
     //
     // `.get('subscriptionStatus', '')` defaults a MISSING field to
     // not-blocked on purpose: tenants provisioned before the field
-    // existed must keep working exactly as before. Only the explicit
-    // string "trial_expired" ever blocks.
+    // existed must keep working exactly as before.
+    //
+    // Two statuses block, for different reasons:
+    //   "trial_expired" — 30-day retention, then auto-purged
+    //   "paused"        — admin-paused, no countdown, indefinite
+    // Both use the SAME condition so there is exactly one access
+    // boundary to reason about; only the on-screen copy differs.
+    //
+    // "comped" (bonus-code) tenants are deliberately NOT in this list:
+    // they have full access, exactly like "active". When a comped period
+    // runs out the scheduled job flips them to "trial_expired", and that
+    // is what blocks them — the comped status itself never does.
     function tenantBlocked(restaurantId) {
       return get(/databases/$(database)/documents/restaurants/$(restaurantId))
-               .data.get('subscriptionStatus', '') == 'trial_expired';
+               .data.get('subscriptionStatus', '') in ['trial_expired', 'paused'];
     }
 
     match /restaurants/{restaurantId} {
@@ -58,8 +87,33 @@ service cloud.firestore {
       // screen with a generic connection error and strand the customer.
       allow read: if isSignedIn();
       // config/staff/dayNotes/weekNotes live on this doc — manager-only,
-      // and frozen entirely once the trial has expired.
-      allow write: if isManagerOf(restaurantId) && !tenantBlocked(restaurantId);
+      // and frozen entirely once the tenant is blocked.
+      allow create, delete: if isManagerOf(restaurantId) && !tenantBlocked(restaurantId);
+      allow update: if !tenantBlocked(restaurantId) && (
+        isManagerOf(restaurantId) ||
+        // Activity heartbeat (lastActiveAt). Staff run on anonymous auth
+        // and cannot write this doc, so without this they would never
+        // register as activity — yet "a staff member clocked in" is the
+        // strongest possible signal that a restaurant is alive.
+        // isSignedIn() matters here even though anonymous sessions pass
+        // it trivially: without it, a completely unauthenticated client
+        // (no Firebase Auth session at all) could still write this field.
+        // hasOnly() pins it to that one field: a signed-in-but-not-manager
+        // session still cannot touch config, staff, PINs or billing.
+        //
+        // KNOWN QUIRK, not a hole: diff() compares VALUES, not which keys
+        // the update() call named. update(ref, {staff: currentStaffValue})
+        // — writing a field back to the value it already has — produces
+        // an EMPTY affectedKeys() set, which vacuously satisfies hasOnly().
+        // A non-manager can therefore "successfully" call update() with
+        // other fields present, as long as every one of them is already
+        // equal to what they're setting it to. This changes nothing about
+        // the document (the write is a real no-op) and discloses nothing
+        // (the caller must already know the current value to trigger it),
+        // so it is not a security issue — documented here so it is not
+        // mistaken for one and "fixed" into something more complicated.
+        (isSignedIn() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastActiveAt']))
+      );
 
       match /entries/{entryId} {
         allow read: if isSignedIn() && !tenantBlocked(restaurantId);

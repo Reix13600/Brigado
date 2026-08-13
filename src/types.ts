@@ -193,8 +193,24 @@ export interface AppData {
   // ever converting to paid; the app must show the blocked screen and
   // nothing else. Data is retained 30 days from trialExpiredAt, then
   // permanently deleted by the purgeExpiredTrials scheduled function.
-  subscriptionStatus?: "active" | "trial_expired";
+  // "active"        — normal paying/trialing tenant, full access
+  // "comped"        — bonus-code signup, no Stripe; full access exactly
+  //                   like "active" until compedUntil passes
+  // "paused"        — admin-paused; blocked, but NO deletion countdown
+  // "trial_expired" — blocked, 30-day retention, then auto-purged
+  subscriptionStatus?: "active" | "comped" | "paused" | "trial_expired";
   trialExpiredAt?: string; // ISO, set when subscriptionStatus flips to trial_expired
+  // Set while paused; the block screen shows a different message for
+  // these than for trial_expired (no deletion date, no billing portal).
+  pausedAt?: string;
+  pauseReason?: string;
+  // Comped (bonus-code) tenants. compedUntil === null means permanent.
+  compedUntil?: string | null;
+  compedVia?: string;
+  // Throttled activity heartbeat — "someone at this restaurant used the
+  // app recently". Write-only for now: nothing in the app reads it, and
+  // the Phase 2 admin analytics view is what will surface it.
+  lastActiveAt?: string;
   // All manager email addresses for this restaurant — lets the Settings
   // UI list/invite/remove managers without needing a Firestore query
   // capability the security rules don't otherwise allow.

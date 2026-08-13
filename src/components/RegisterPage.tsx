@@ -1,8 +1,10 @@
 import React, { useState } from "react";
 import { doc, getDoc } from "firebase/firestore";
-import { db } from "../firebase";
+import { httpsCallable } from "firebase/functions";
+import { db, functions } from "../firebase";
 import { ensureAnonymousSession } from "../utils/auth";
-import { ArrowLeft } from "lucide-react";
+import { isReservedSlug } from "../utils/reservedSlugs";
+import { ArrowLeft, Ticket } from "lucide-react";
 import { L, LandingLang } from "../utils/landingCopy";
 import Footer from "./Footer";
 import MarketingBackground from "./MarketingBackground";
@@ -37,14 +39,37 @@ export default function RegisterPage() {
   const [slugStatus, setSlugStatus] = useState<"idle" | "available" | "taken" | "invalid">("idle");
   const [submitting, setSubmitting] = useState(false);
   const [plan, setPlan] = useState<"monthly" | "yearly">("monthly");
+  // Bonus-code path. Deliberately collapsed by default and styled as a
+  // small secondary link: the paid signup is the primary route, and a
+  // prominent "got a code?" field invites people to go hunting for one.
+  const [showCode, setShowCode] = useState(false);
+  const [bonusCode, setBonusCode] = useState("");
+  const [codeError, setCodeError] = useState("");
+  const [redeeming, setRedeeming] = useState(false);
 
   const t = (key: Parameters<typeof L>[1]) => L(lang, key);
   const effectiveSlug = slugTouched ? slug : slugify(restaurantName);
+
+  // Shared by the paid button and the bonus-code path so the two can
+  // never drift on what counts as a complete form.
+  const canSubmit =
+    slugStatus === "available" &&
+    !!email.trim() && !!restaurantName.trim() && !!contactName.trim() &&
+    !!phone.trim() && !!city.trim();
 
   const checkSlugAvailability = async () => {
     const candidate = effectiveSlug;
     if (!candidate || candidate.length < 2) {
       setSlugStatus("invalid");
+      return;
+    }
+    // Reserved names would route to a static page or the admin dashboard
+    // instead of the restaurant, leaving the tenant unreachable. Reported
+    // as "taken" because that is what it means to the person filling this
+    // in. The server enforces the same list at provisioning time — this
+    // check is only here to fail fast.
+    if (isReservedSlug(candidate)) {
+      setSlugStatus("taken");
       return;
     }
     setChecking(true);
@@ -57,6 +82,42 @@ export default function RegisterPage() {
       setSlugStatus("invalid");
     } finally {
       setChecking(false);
+    }
+  };
+
+  /** Bonus-code signup: provisions immediately via the redeemBonusCode
+   * callable and never touches Stripe. A failure here is non-terminal by
+   * design — the error shows inline and the normal paid button below is
+   * still right there, so a bad code never dead-ends the signup. */
+  const handleRedeemCode = async () => {
+    if (!bonusCode.trim() || !canSubmit) return;
+    setRedeeming(true);
+    setCodeError("");
+    try {
+      const redeem = httpsCallable(functions, "redeemBonusCode");
+      await redeem({
+        code: bonusCode.trim(),
+        slug: effectiveSlug,
+        restaurantName: restaurantName.trim(),
+        email: email.trim(),
+        contactName: contactName.trim(),
+        phone: phone.trim(),
+        postcode: postcode.trim(),
+        city: city.trim(),
+        lang,
+      });
+      // Same destination as the Stripe success redirect: "check your
+      // email for the password link".
+      window.location.href = "/welcome";
+    } catch (err) {
+      const msg = (err as { message?: string })?.message || "";
+      setCodeError(
+        msg ||
+          (lang === "fr"
+            ? "Ce code n'a pas pu être utilisé."
+            : "That code could not be used."),
+      );
+      setRedeeming(false);
     }
   };
 
@@ -219,10 +280,50 @@ export default function RegisterPage() {
             <button
               className="w-full py-3 bg-lime-400 text-slate-950 font-bold rounded-xl hover:bg-lime-300 transition-all disabled:opacity-40"
               onClick={handleContinueToPayment}
-              disabled={slugStatus !== "available" || !email.trim() || !restaurantName.trim() || !contactName.trim() || !phone.trim() || !city.trim() || submitting}
+              disabled={!canSubmit || submitting || redeeming}
             >
               {submitting ? "..." : `${t("continueToPayment")} — ${plan === "monthly" ? `€39${lang === "fr" ? "/mois" : "/mo"}` : `€390${lang === "fr" ? "/an" : "/yr"}`}`}
             </button>
+
+            {/* Bonus code — intentionally secondary to the paid path above:
+                a collapsed text link, not a field competing with checkout. */}
+            {!showCode ? (
+              <button
+                type="button"
+                onClick={() => setShowCode(true)}
+                className="w-full text-[11px] font-semibold text-slate-500 hover:text-lime-400 underline underline-offset-2"
+              >
+                {lang === "fr" ? "J'ai un code" : "I have a code"}
+              </button>
+            ) : (
+              <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-3 space-y-2">
+                <label className="flex items-center gap-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                  <Ticket size={12} strokeWidth={1.5} />
+                  {lang === "fr" ? "Code bonus" : "Bonus code"}
+                </label>
+                <input
+                  className="w-full bg-slate-950/60 border border-slate-800 rounded-xl p-2.5 text-sm font-mono uppercase focus:outline-none focus:border-lime-400/50"
+                  placeholder={lang === "fr" ? "VOTRECODE" : "YOURCODE"}
+                  value={bonusCode}
+                  onChange={e => { setBonusCode(e.target.value.toUpperCase()); setCodeError(""); }}
+                />
+                {codeError && <p className="text-[11px] text-rose-400">{codeError}</p>}
+                <button
+                  className="w-full py-2.5 border border-lime-400/40 text-lime-400 font-bold rounded-xl text-sm hover:bg-lime-400/10 transition-all disabled:opacity-40"
+                  onClick={handleRedeemCode}
+                  disabled={!canSubmit || !bonusCode.trim() || redeeming || submitting}
+                >
+                  {redeeming
+                    ? (lang === "fr" ? "Vérification…" : "Checking…")
+                    : (lang === "fr" ? "Utiliser le code" : "Use code")}
+                </button>
+                <p className="text-[10px] text-slate-600">
+                  {lang === "fr"
+                    ? "Remplissez les champs ci-dessus, puis utilisez votre code — aucune carte requise."
+                    : "Fill in the fields above, then use your code — no card required."}
+                </p>
+              </div>
+            )}
 
           </div>
         </div>

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { doc, onSnapshot } from "firebase/firestore";
+import { doc, onSnapshot, updateDoc } from "firebase/firestore";
 import { AppData } from "./types";
 import { fetchAppData } from "./utils/api";
 import { ensureAnonymousSession } from "./utils/auth";
@@ -7,6 +7,8 @@ import { getTranslation, LangType } from "./utils/translations";
 import StaffDashboard from "./components/StaffDashboard";
 import ManagerDashboard from "./components/ManagerDashboard";
 import TrialExpiredScreen from "./components/TrialExpiredScreen";
+import PausedScreen from "./components/PausedScreen";
+import AdminDashboard from "./components/AdminDashboard";
 import Landing from "./components/Landing";
 import LegalPage from "./components/LegalPage";
 import ContactPage from "./components/ContactPage";
@@ -17,10 +19,15 @@ import { db, getSlugFromUrl, setRestaurantId } from "./firebase";
 import logoFull from "./assets/logo-full.png";
 import { Clock, Users, Sun, Moon } from "lucide-react";
 
+// Minimum gap between lastActiveAt writes for one tenant. 30 minutes is
+// short enough that "active today" is accurate and long enough that a
+// busy dinner service costs a couple of writes, not hundreds.
+const ACTIVITY_HEARTBEAT_MS = 30 * 60 * 1000;
+
 // Static marketing/legal pages live at these paths — never treated as a
 // restaurant slug, even though they're single top-level path segments
 // just like a slug would be.
-const STATIC_PAGES: Record<string, "mentions" | "cgv" | "privacy" | "contact" | "features" | "register" | "welcome"> = {
+const STATIC_PAGES: Record<string, "mentions" | "cgv" | "privacy" | "contact" | "features" | "register" | "welcome" | "admin"> = {
   "mentions-legales": "mentions",
   "cgv": "cgv",
   "confidentialite": "privacy",
@@ -28,6 +35,11 @@ const STATIC_PAGES: Record<string, "mentions" | "cgv" | "privacy" | "contact" | 
   "features": "features",
   "register": "register",
   "welcome": "welcome",
+  // Platform-level Site Manager dashboard. Sits OUTSIDE the slug-based
+  // tenant model on purpose: it is not scoped to any restaurant. Listed
+  // here so /admin is never resolved as a restaurant slug, and mirrored
+  // in RESERVED_SLUGS so no restaurant can ever register it.
+  "admin": "admin",
 };
 
 export default function App() {
@@ -131,11 +143,39 @@ export default function App() {
       });
   }, [refreshTrigger, restaurantSlug]);
 
+  // ── Activity heartbeat (lastActiveAt) ────────────────────────────────
+  // Fires once per successful app load for this tenant, which is the
+  // lightest hook that still catches BOTH audiences: every staff PIN
+  // session and every manager session comes through here. Deliberately
+  // not attached to individual reads/writes — this only needs to answer
+  // "is anyone still using this restaurant?", not count actions.
+  //
+  // Throttled against the value we already fetched, so a busy service
+  // with staff clocking in all evening costs one write per 30 minutes,
+  // not one per page load. Failures are swallowed: a heartbeat must
+  // never surface as an error in a working app.
+  useEffect(() => {
+    if (!restaurantSlug || !appData) return;
+    // Blocked tenants are denied this write by the rules anyway, and a
+    // blocked tenant isn't "active" in any meaningful sense.
+    if (appData.subscriptionStatus === "trial_expired" || appData.subscriptionStatus === "paused") return;
+
+    const lastMs = Date.parse(appData.lastActiveAt || "");
+    const isStale = isNaN(lastMs) || Date.now() - lastMs > ACTIVITY_HEARTBEAT_MS;
+    if (!isStale) return;
+
+    updateDoc(doc(db, "restaurants", restaurantSlug), { lastActiveAt: new Date().toISOString() })
+      .catch(err => console.debug("lastActiveAt heartbeat skipped:", err?.code ?? err));
+  }, [restaurantSlug, appData]);
+
   const handleSetLang = (newLang: LangType) => {
     setLang(newLang);
     localStorage.setItem("app_lang", newLang);
   };
 
+  if (staticPage === "admin") {
+    return <AdminDashboard />;
+  }
   if (staticPage === "contact") {
     return <ContactPage />;
   }
@@ -209,6 +249,14 @@ export default function App() {
         theme={theme}
       />
     );
+  }
+
+  // Admin-paused. Same gate as trial_expired (nothing behind it mounts,
+  // and the rules deny the subcollections either way) but a different
+  // screen: a pause has no deletion date and no self-service way out, so
+  // showing the trial-expiry copy would be actively misleading.
+  if (subscriptionStatus === "paused") {
+    return <PausedScreen lang={lang} setLang={handleSetLang} theme={theme} />;
   }
 
   // Legacy soft-suspend flag — only reachable for docs suspended before

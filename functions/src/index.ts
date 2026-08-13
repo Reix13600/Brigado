@@ -10,6 +10,7 @@ import {
   addContactToJoinedList, addContactToTrialExpiredList,
   removeContactFromTrialExpiredList, markBrevoContactConverted,
 } from "./brevo";
+import { isReservedSlug } from "./reservedSlugs";
 
 initializeApp();
 const db = getFirestore();
@@ -207,15 +208,37 @@ async function provisionRestaurant(
   slug: string, restaurantName: string, email: string,
   contactName: string, phone: string, postcode: string,
   city: string, preferredLang: "fr" | "en",
-  stripeCustomerId?: string
+  stripeCustomerId?: string,
+  // Set for bonus-code signups: same provisioning, no Stripe. Everything
+  // else about the tenant is identical, which is why this is an option on
+  // the existing function rather than a parallel implementation.
+  comped?: { via: string; untilISO: string | null }
 ): Promise<void> {
+  // Reserved slugs are rejected HERE, not just in the registration form:
+  // the slug arrives inside Stripe's client_reference_id and never has to
+  // pass through that form, so the client check is UX only. A tenant on a
+  // reserved slug would be routed to a static page / the admin dashboard
+  // and be permanently unreachable.
+  if (isReservedSlug(slug)) {
+    logger.error(`Refusing to provision reserved slug "${slug}" — signup must be reconciled manually`);
+    throw new Error(`Reserved slug: ${slug}`);
+  }
+
   const restoRef = db.doc(`restaurants/${slug}`);
   const existing = await restoRef.get();
   if (existing.exists) {
+    const prior = existing.data()?.subscriptionStatus;
+    // An admin-paused tenant must not silently un-pause itself by running
+    // through checkout again — only an admin resumes a pause.
+    if (prior === "paused") {
+      logger.warn(`Restaurant "${slug}" is admin-paused — linking billing but leaving the pause in place.`);
+      if (stripeCustomerId) await restoRef.update({ stripeCustomerId });
+      return;
+    }
     logger.warn(`Restaurant "${slug}" already exists — skipping provisioning, just linking billing.`);
     // A blocked (trial_expired) restaurant re-subscribing through checkout
     // with its original slug lands here: relink billing and lift the block.
-    const wasExpired = existing.data()?.subscriptionStatus === "trial_expired";
+    const wasExpired = prior === "trial_expired";
     await restoRef.update({
       ...(stripeCustomerId ? { stripeCustomerId } : {}),
       subscriptionStatus: "active",
@@ -251,7 +274,22 @@ async function provisionRestaurant(
     weekNotes: {},
     stripeCustomerId: stripeCustomerId || null,
     suspended: false,
-    subscriptionStatus: "active",
+    // "comped" behaves exactly like "active" for access purposes — it is a
+    // separate value only so the admin dashboard can tell a bonus-code
+    // tenant from a paying one, and so the scheduled sweep can find the
+    // ones whose free period has run out.
+    subscriptionStatus: comped ? "comped" : "active",
+    ...(comped
+      ? {
+          compedVia: comped.via,
+          compedGrantedAt: new Date().toISOString(),
+          // null = permanent; the expiry sweep skips these by construction.
+          compedUntil: comped.untilISO,
+        }
+      : {}),
+    // Seeded at creation so the tenant has a sane value before anyone
+    // opens the app (Phase 2 analytics reads this).
+    lastActiveAt: new Date().toISOString(),
     managerEmails: [email],
     // The original signup email — the ONE address lifecycle email (e.g.
     // the Brevo trial-expired sequence) goes to, stable even if managers
@@ -295,6 +333,10 @@ async function provisionRestaurant(
       city,
       phone,
       lang: preferredLang,
+      // "comped" = arrived via a bonus code (no Stripe), "paid" = normal
+      // checkout. Lets the Brevo side segment the two without inspecting
+      // subscriptionStatus, which changes over a tenant's life.
+      signupType: comped ? "comped" : "paid",
     }, joinedConf.apiKey, joinedConf.listId);
   }
   // Setting CONVERTED only marks the contact — it does not itself stop
@@ -564,6 +606,33 @@ export const purgeExpiredTrials = onSchedule(
   async () => {
     const stripe = new Stripe(stripeSecretKey.value());
     const now = Date.now();
+
+    // ── Comped tenants whose free period has run out ──────────────────
+    // Runs BEFORE the purge sweep so a code that expired today enters the
+    // pipeline on the same run, with a fresh 30-day clock. It only flips
+    // the status; deletion is the ordinary path from there, unchanged.
+    // Permanent comps (compedUntil === null) are skipped by construction.
+    const compedSnap = await db.collection("restaurants").where("subscriptionStatus", "==", "comped").get();
+    for (const resto of compedSnap.docs) {
+      const until = resto.data().compedUntil;
+      if (!until) continue; // permanent comp — never expires
+      const untilMs = Date.parse(until);
+      if (isNaN(untilMs)) {
+        logger.error(`compedExpiry: ${resto.id} has an unparseable compedUntil ("${until}") — leaving alone, investigate manually`);
+        continue;
+      }
+      if (untilMs > now) continue;
+      await resto.ref.update({
+        subscriptionStatus: "trial_expired",
+        subscriptionStatusReason: `comped period ended ${until}`,
+        subscriptionStatusUpdatedAt: new Date().toISOString(),
+        suspended: true,
+        trialExpiredAt: new Date().toISOString(),
+        deletionReason: "comped_expired",
+      });
+      logger.warn(`compedExpiry: ${resto.id} comped period ended (${until}) — moved to trial_expired, 30-day clock started`);
+    }
+
     // Single-field equality query — no composite index needed; the age
     // cutoff is applied in code (tenant counts are small).
     const expiredSnap = await db.collection("restaurants").where("subscriptionStatus", "==", "trial_expired").get();
@@ -584,7 +653,17 @@ export const purgeExpiredTrials = onSchedule(
       // A missed/out-of-order webhook must never let us delete a paying
       // customer — the stored flag alone is not trusted this close to
       // deletion. Any Stripe error → skip this tenant, try again tomorrow.
-      if (data.stripeCustomerId) {
+      //
+      // EXCEPTION: an admin-initiated deletion is a deliberate human
+      // decision, so a still-live subscription is not evidence of a missed
+      // webhook and must not resurrect the tenant. Without this, deleting
+      // a paying business from the admin dashboard would be silently
+      // undone on the next nightly run. The subscription itself is NOT
+      // cancelled here — billing is ended in Stripe by hand, on purpose:
+      // no dashboard button should move real money.
+      if (data.deletionReason === "admin_delete") {
+        logger.warn(`purgeExpiredTrials: ${slug} was deleted by admin ${data.deletionInitiatedBy || "?"} — skipping the Stripe restore check. If a subscription is still live it must be cancelled in Stripe manually.`);
+      } else if (data.stripeCustomerId) {
         let subs: Stripe.ApiList<Stripe.Subscription>;
         try {
           subs = await stripe.subscriptions.list({ customer: data.stripeCustomerId, status: "all", limit: 100 });
@@ -634,6 +713,13 @@ async function purgeTenant(resto: FirebaseFirestore.QueryDocumentSnapshot): Prom
     managerAccountCount: managersSnap.size,
     subcollectionDocCounts: docCounts,
     reason: `trial_expired for ${TRIAL_DATA_RETENTION_DAYS}+ days without reactivation`,
+    // How this tenant entered the pipeline. "admin_delete" = a human
+    // pressed delete in the admin dashboard; "comped_expired" = a bonus
+    // code's free period ran out; absent/"trial_expiry" = an ordinary
+    // Stripe trial expiry. The retention window and mechanics are
+    // identical in all three cases — this only records the origin.
+    deletionReason: data.deletionReason || "trial_expiry",
+    deletionInitiatedBy: data.deletionInitiatedBy || null,
   });
   logger.warn(`purgeExpiredTrials: DELETING tenant ${slug}`, { docCounts, managerAccounts: managersSnap.size });
 
@@ -812,4 +898,415 @@ export const removeManager = onCall(
     await restoRef.update({ managerEmails: FieldValue.arrayRemove(email) });
     return { removed: true, email };
   }
+);
+
+// ── PLATFORM ADMIN (Site Manager dashboard) ──────────────────────────
+// Everything below is gated by assertCallerIsPlatformAdmin, checked
+// server-side on EVERY call. The /admin route's client-side guard is
+// convenience only — it decides what to render, never what is
+// permitted. platformAdmins is unreadable from the client (see
+// firestore.rules), so the client cannot even enumerate admins.
+
+/** Throws unless the caller is signed in AND their email has a
+ * platformAdmins/{email} doc. The doc id is the lowercased email, so
+ * this is a single get() rather than a query. Returns that email. */
+async function assertCallerIsPlatformAdmin(
+  auth_: { uid?: string; token?: Record<string, unknown> } | undefined,
+): Promise<string> {
+  const uid = auth_?.uid;
+  if (!uid) throw new HttpsError("unauthenticated", "Must be signed in");
+  // Read the email from the VERIFIED ID token, never from request.data —
+  // the token is signed by Firebase and cannot be forged by the caller.
+  const email = String(auth_?.token?.email ?? "").trim().toLowerCase();
+  if (!email) throw new HttpsError("permission-denied", "Not a platform admin");
+  const adminDoc = await db.doc(`platformAdmins/${email}`).get();
+  if (!adminDoc.exists) {
+    logger.warn(`Platform admin check FAILED for uid=${uid} email=${email}`);
+    throw new HttpsError("permission-denied", "Not a platform admin");
+  }
+  return email;
+}
+
+/** Cheap "am I an admin?" probe for the dashboard's route guard. Returns
+ * a boolean instead of throwing so the client can render a clean
+ * "not authorised" screen rather than an error state. */
+export const adminWhoAmI = onCall(async (request) => {
+  try {
+    const email = await assertCallerIsPlatformAdmin(request.auth);
+    return { isAdmin: true, email };
+  } catch {
+    return { isAdmin: false, email: null };
+  }
+});
+
+/** Plan label for the Businesses list. Comped fields win over Stripe,
+ * because a comped tenant has no subscription at all. */
+function derivePlan(data: FirebaseFirestore.DocumentData): string {
+  if (data.subscriptionStatus === "comped" || data.compedGrantedAt) {
+    return data.compedUntil
+      ? `Comped until ${String(data.compedUntil).slice(0, 10)}`
+      : "Comped (permanent)";
+  }
+  if (data.stripePlan === "yearly" || data.stripePlan === "monthly") return data.stripePlan;
+  return data.stripeCustomerId ? "Paid" : "Trial";
+}
+
+export const adminListBusinesses = onCall(async (request) => {
+  await assertCallerIsPlatformAdmin(request.auth);
+  const snap = await db.collection("restaurants").get();
+  const businesses = snap.docs.map((d) => {
+    const x = d.data();
+    return {
+      slug: d.id,
+      name: x.config?.resto_name || d.id,
+      city: x.ownerContact?.city || "",
+      signupEmail: x.signupEmail || x.managerEmails?.[0] || "",
+      // A tenant provisioned before subscriptionStatus existed reads as
+      // "active", matching how the rules and App.tsx treat a missing field.
+      status: x.subscriptionStatus || "active",
+      plan: derivePlan(x),
+      joinedAt: x.compedGrantedAt || x.createdAt || null,
+      lastActiveAt: x.lastActiveAt || null,
+      trialExpiredAt: x.trialExpiredAt || null,
+      pausedAt: x.pausedAt || null,
+      pauseReason: x.pauseReason || null,
+      compedUntil: x.compedUntil || null,
+      compedVia: x.compedVia || null,
+      staffCount: (x.staff || []).length,
+      adminNotes: x.adminNotes || "",
+      hasStripe: !!x.stripeCustomerId,
+      deletionReason: x.deletionReason || null,
+    };
+  });
+  return { businesses };
+});
+
+export const adminPauseBusiness = onCall(async (request) => {
+  const adminEmail = await assertCallerIsPlatformAdmin(request.auth);
+  const { slug, reason } = request.data as { slug?: string; reason?: string };
+  if (!slug) throw new HttpsError("invalid-argument", "slug is required");
+
+  const ref = db.doc(`restaurants/${slug}`);
+  const snap = await ref.get();
+  if (!snap.exists) throw new HttpsError("not-found", "Restaurant not found");
+  const prior = snap.data()?.subscriptionStatus || "active";
+  if (prior === "paused") throw new HttpsError("failed-precondition", "Already paused");
+
+  await ref.update({
+    subscriptionStatus: "paused",
+    // Captured so resume restores the real prior state instead of
+    // guessing "active" — a comped tenant must come back as comped.
+    statusBeforePause: prior,
+    pausedAt: new Date().toISOString(),
+    pausedBy: adminEmail,
+    pauseReason: reason || null,
+    subscriptionStatusReason: `paused by admin ${adminEmail}`,
+    subscriptionStatusUpdatedAt: new Date().toISOString(),
+    // Deliberately NOT setting suspended:true. markSubscriptionActive()
+    // reactivates anything with suspended===true, so mirroring the legacy
+    // flag here would let a routine Stripe invoice.paid silently un-pause
+    // an admin pause. Blocking for "paused" is driven by
+    // subscriptionStatus alone, in both App.tsx and firestore.rules.
+    suspended: false,
+  });
+  logger.warn(`ADMIN: ${adminEmail} paused ${slug} (was ${prior})`);
+  return { ok: true, slug, previousStatus: prior };
+});
+
+export const adminResumeBusiness = onCall(async (request) => {
+  const adminEmail = await assertCallerIsPlatformAdmin(request.auth);
+  const { slug } = request.data as { slug?: string };
+  if (!slug) throw new HttpsError("invalid-argument", "slug is required");
+
+  const ref = db.doc(`restaurants/${slug}`);
+  const snap = await ref.get();
+  if (!snap.exists) throw new HttpsError("not-found", "Restaurant not found");
+  const data = snap.data() || {};
+  if (data.subscriptionStatus !== "paused") {
+    throw new HttpsError("failed-precondition", "That business is not paused");
+  }
+
+  // Fall back to "active" only if the pause predates statusBeforePause.
+  // Never resume INTO trial_expired: that would drop the tenant straight
+  // back into the deletion pipeline on a stale clock. Such a tenant comes
+  // back active and can be deleted deliberately if that is the intent.
+  const restored =
+    data.statusBeforePause && data.statusBeforePause !== "trial_expired"
+      ? data.statusBeforePause
+      : "active";
+
+  await ref.update({
+    subscriptionStatus: restored,
+    subscriptionStatusReason: `resumed by admin ${adminEmail}`,
+    subscriptionStatusUpdatedAt: new Date().toISOString(),
+    suspended: false,
+    statusBeforePause: FieldValue.delete(),
+    pausedAt: FieldValue.delete(),
+    pausedBy: FieldValue.delete(),
+    pauseReason: FieldValue.delete(),
+  });
+  logger.warn(`ADMIN: ${adminEmail} resumed ${slug} -> ${restored}`);
+  return { ok: true, slug, restoredTo: restored };
+});
+
+/** Admin delete does NOT delete anything immediately. It puts the tenant
+ * into the SAME trial-expiry pipeline a real expiry uses: 30 days behind
+ * the block screen, then purgeExpiredTrials erases it. That reuse is the
+ * point — one deletion path, one retention guarantee, one audit trail,
+ * nothing bespoke to get wrong. */
+export const adminDeleteBusiness = onCall(async (request) => {
+  const adminEmail = await assertCallerIsPlatformAdmin(request.auth);
+  const { slug, confirmName } = request.data as { slug?: string; confirmName?: string };
+  if (!slug) throw new HttpsError("invalid-argument", "slug is required");
+
+  const ref = db.doc(`restaurants/${slug}`);
+  const snap = await ref.get();
+  if (!snap.exists) throw new HttpsError("not-found", "Restaurant not found");
+  const data = snap.data() || {};
+  const realName = data.config?.resto_name || slug;
+
+  // Re-checked server-side: the typed-name confirmation is a real guard,
+  // not just a UI speed bump.
+  if ((confirmName || "").trim() !== String(realName).trim()) {
+    throw new HttpsError("failed-precondition", "Typed name does not match the restaurant name");
+  }
+  if (data.subscriptionStatus === "trial_expired") {
+    throw new HttpsError("failed-precondition", "That business is already pending deletion");
+  }
+
+  const nowISO = new Date().toISOString();
+  await ref.update({
+    subscriptionStatus: "trial_expired",
+    trialExpiredAt: nowISO,
+    suspended: true,
+    subscriptionStatusReason: `deleted by admin ${adminEmail}`,
+    subscriptionStatusUpdatedAt: nowISO,
+    // Read by purgeExpiredTrials: tells the Stripe safety rail this is a
+    // deliberate human decision, not a missed webhook, so a still-live
+    // subscription must not resurrect the tenant. Both fields also ride
+    // into the deletionAudit record written at purge time.
+    deletionReason: "admin_delete",
+    deletionInitiatedBy: adminEmail,
+    statusBeforePause: FieldValue.delete(),
+  });
+
+  const purgeAfter = new Date(Date.now() + TRIAL_DATA_RETENTION_DAYS * 86_400_000).toISOString();
+  logger.warn(`ADMIN: ${adminEmail} scheduled ${slug} for deletion (retention until ${purgeAfter.slice(0, 10)})`);
+  if (data.stripeCustomerId) {
+    logger.warn(`ADMIN: ${slug} still has Stripe customer ${data.stripeCustomerId} — the subscription is NOT cancelled automatically. Cancel it in Stripe if billing should stop.`);
+  }
+  return { ok: true, slug, deletionScheduledFor: purgeAfter, hadStripe: !!data.stripeCustomerId };
+});
+
+export const adminSetNotes = onCall(async (request) => {
+  const adminEmail = await assertCallerIsPlatformAdmin(request.auth);
+  const { slug, notes } = request.data as { slug?: string; notes?: string };
+  if (!slug) throw new HttpsError("invalid-argument", "slug is required");
+  await db.doc(`restaurants/${slug}`).update({ adminNotes: String(notes ?? "").slice(0, 4000) });
+  logger.info(`ADMIN: ${adminEmail} updated notes on ${slug}`);
+  return { ok: true };
+});
+
+// ── Admin management ─────────────────────────────────────────────────
+
+export const adminListAdmins = onCall(async (request) => {
+  await assertCallerIsPlatformAdmin(request.auth);
+  const snap = await db.collection("platformAdmins").get();
+  return {
+    admins: snap.docs.map((d) => ({
+      email: d.id,
+      addedAt: d.data().addedAt || null,
+      addedBy: d.data().addedBy || null,
+    })),
+  };
+});
+
+export const adminAddAdmin = onCall(async (request) => {
+  const adminEmail = await assertCallerIsPlatformAdmin(request.auth);
+  const raw = String((request.data as { email?: string })?.email ?? "").trim().toLowerCase();
+  if (!raw || !raw.includes("@") || raw.length > 254) {
+    throw new HttpsError("invalid-argument", "A valid email is required");
+  }
+  const ref = db.doc(`platformAdmins/${raw}`);
+  if ((await ref.get()).exists) throw new HttpsError("already-exists", "That email is already an admin");
+  await ref.set({ email: raw, addedAt: new Date().toISOString(), addedBy: adminEmail });
+  logger.warn(`ADMIN: ${adminEmail} granted platform admin to ${raw}`);
+  return { ok: true, email: raw };
+});
+
+// ── Bonus codes ──────────────────────────────────────────────────────
+
+export const adminCreateBonusCode = onCall(async (request) => {
+  const adminEmail = await assertCallerIsPlatformAdmin(request.auth);
+  const { code, durationDays, maxRedemptions, note, expiresAt } = request.data as {
+    code?: string;
+    durationDays?: number | null;
+    maxRedemptions?: number;
+    note?: string;
+    expiresAt?: string | null;
+  };
+  const normalized = String(code ?? "").trim().toUpperCase();
+  if (!normalized || normalized.length < 3 || !/^[A-Z0-9-]+$/.test(normalized)) {
+    throw new HttpsError("invalid-argument", "Code must be 3+ characters, A-Z 0-9 and dashes only");
+  }
+  if (maxRedemptions !== undefined && (!Number.isInteger(maxRedemptions) || maxRedemptions < 1)) {
+    throw new HttpsError("invalid-argument", "maxRedemptions must be a positive integer");
+  }
+  if (durationDays !== null && durationDays !== undefined && (!Number.isInteger(durationDays) || durationDays < 1)) {
+    throw new HttpsError("invalid-argument", "durationDays must be a positive integer, or null for permanent");
+  }
+
+  const ref = db.doc(`bonusCodes/${normalized}`);
+  if ((await ref.get()).exists) throw new HttpsError("already-exists", "That code already exists");
+  await ref.set({
+    code: normalized,
+    durationDays: durationDays ?? null, // null = permanent comp
+    maxRedemptions: maxRedemptions ?? 1,
+    redemptionCount: 0,
+    active: true,
+    expiresAt: expiresAt || null,
+    note: note || "",
+    createdAt: new Date().toISOString(),
+    createdBy: adminEmail,
+  });
+  logger.warn(`ADMIN: ${adminEmail} created bonus code ${normalized}`);
+  return { ok: true, code: normalized };
+});
+
+export const adminListBonusCodes = onCall(async (request) => {
+  await assertCallerIsPlatformAdmin(request.auth);
+  const snap = await db.collection("bonusCodes").get();
+  return {
+    codes: snap.docs.map((d) => {
+      const x = d.data();
+      return {
+        code: d.id,
+        durationDays: x.durationDays ?? null,
+        maxRedemptions: x.maxRedemptions ?? 1,
+        redemptionCount: x.redemptionCount ?? 0,
+        active: x.active !== false,
+        expiresAt: x.expiresAt || null,
+        note: x.note || "",
+        createdAt: x.createdAt || null,
+        createdBy: x.createdBy || null,
+      };
+    }),
+  };
+});
+
+export const adminToggleBonusCode = onCall(async (request) => {
+  const adminEmail = await assertCallerIsPlatformAdmin(request.auth);
+  const { code, active } = request.data as { code?: string; active?: boolean };
+  if (!code || typeof active !== "boolean") {
+    throw new HttpsError("invalid-argument", "code and active are required");
+  }
+  const ref = db.doc(`bonusCodes/${String(code).toUpperCase()}`);
+  if (!(await ref.get()).exists) throw new HttpsError("not-found", "Code not found");
+  await ref.update({ active });
+  logger.warn(`ADMIN: ${adminEmail} set ${code} active=${active}`);
+  return { ok: true };
+});
+
+export const adminListRedemptions = onCall(async (request) => {
+  await assertCallerIsPlatformAdmin(request.auth);
+  const { code } = request.data as { code?: string };
+  if (!code) throw new HttpsError("invalid-argument", "code is required");
+  const snap = await db.collection(`bonusCodes/${String(code).toUpperCase()}/redemptions`).get();
+  return {
+    redemptions: snap.docs.map((d) => ({
+      slug: d.id,
+      redeemedAt: d.data().redeemedAt || null,
+      restaurantName: d.data().restaurantName || d.id,
+    })),
+  };
+});
+
+/** Public callable used by the registration form's "I have a code" path.
+ *
+ * Concurrency: the slot is RESERVED inside a transaction — incrementing
+ * the counter and writing the redemption doc together — before any
+ * provisioning happens. Two simultaneous redemptions of a
+ * maxRedemptions=1 code therefore cannot both win: the second
+ * transaction re-reads the incremented count and fails. If provisioning
+ * then throws, the reservation is rolled back so the slot is not burned.
+ * (Incrementing only AFTER provisioning cannot be made concurrency-safe:
+ * reserving the slot IS the increment.) */
+export const redeemBonusCode = onCall(
+  { secrets: [resendApiKey, brevoApiKey] },
+  async (request) => {
+    const { code, slug, restaurantName, email, contactName, phone, postcode, city, lang } =
+      request.data as Record<string, string>;
+    const normalized = String(code ?? "").trim().toUpperCase();
+    if (!normalized) throw new HttpsError("invalid-argument", "A code is required");
+    if (!slug || !restaurantName || !email) {
+      throw new HttpsError("invalid-argument", "slug, restaurantName and email are required");
+    }
+    if (isReservedSlug(slug)) {
+      throw new HttpsError("invalid-argument", "That address is reserved — please choose another");
+    }
+    if ((await db.doc(`restaurants/${slug}`).get()).exists) {
+      throw new HttpsError("already-exists", "That address is already taken");
+    }
+
+    const codeRef = db.doc(`bonusCodes/${normalized}`);
+    const nowISO = new Date().toISOString();
+
+    // ── Reserve the slot atomically ──
+    const reserved = await db.runTransaction(async (tx) => {
+      const snap = await tx.get(codeRef);
+      if (!snap.exists) throw new HttpsError("not-found", "Unknown code");
+      const c = snap.data() || {};
+      if (c.active === false) throw new HttpsError("failed-precondition", "This code is no longer active");
+      if (c.expiresAt && Date.parse(c.expiresAt) < Date.now()) {
+        throw new HttpsError("failed-precondition", "This code has expired");
+      }
+      const count = c.redemptionCount ?? 0;
+      const max = c.maxRedemptions ?? 1;
+      if (count >= max) {
+        throw new HttpsError("resource-exhausted", "This code has already been fully redeemed");
+      }
+      tx.update(codeRef, { redemptionCount: count + 1 });
+      tx.set(codeRef.collection("redemptions").doc(slug), { redeemedAt: nowISO, restaurantName });
+      return { durationDays: (c.durationDays ?? null) as number | null };
+    });
+
+    // ── Provision (outside the transaction: it creates Auth users and
+    // sends email, neither of which can take part in one) ──
+    const untilISO =
+      reserved.durationDays === null
+        ? null
+        : new Date(Date.now() + reserved.durationDays * 86_400_000).toISOString();
+    try {
+      await provisionRestaurant(
+        slug,
+        restaurantName,
+        email,
+        contactName || "",
+        phone || "",
+        postcode || "",
+        city || "",
+        lang === "en" ? "en" : "fr",
+        undefined, // no Stripe customer — this path never touches Stripe
+        { via: normalized, untilISO },
+      );
+    } catch (err) {
+      // Release the reservation so a failed provision does not silently
+      // consume the last slot of a limited code.
+      logger.error(`redeemBonusCode: provisioning failed for ${slug} with ${normalized} — releasing the reserved slot`, err);
+      try {
+        await db.runTransaction(async (tx) => {
+          const snap = await tx.get(codeRef);
+          const count = snap.data()?.redemptionCount ?? 1;
+          tx.update(codeRef, { redemptionCount: Math.max(0, count - 1) });
+          tx.delete(codeRef.collection("redemptions").doc(slug));
+        });
+      } catch (rollbackErr) {
+        logger.error(`redeemBonusCode: ROLLBACK FAILED for ${normalized}/${slug} — redemptionCount may be one too high, reconcile manually`, rollbackErr);
+      }
+      throw new HttpsError("internal", "Could not create the restaurant — nothing was charged. Please contact support.");
+    }
+
+    logger.warn(`Bonus code ${normalized} redeemed by ${slug} (comped until ${untilISO ?? "permanent"})`);
+    return { ok: true, slug, compedUntil: untilISO };
+  },
 );

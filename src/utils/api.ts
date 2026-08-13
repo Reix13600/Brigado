@@ -143,6 +143,7 @@ export async function fetchAppData(): Promise<AppData> {
     suspended: restoData.suspended === true,
     subscriptionStatus: restoData.subscriptionStatus,
     trialExpiredAt: restoData.trialExpiredAt,
+    lastActiveAt: restoData.lastActiveAt,
     managerEmails: restoData.managerEmails ?? [],
   };
 }

@@ -47,6 +47,8 @@ export interface JoinedContact {
   city: string;   // "" for pre-city-field signups
   phone: string;  // "" when unknown
   lang: "fr" | "en";
+  /** "paid" = normal Stripe checkout, "comped" = bonus-code signup. */
+  signupType: "paid" | "comped";
 }
 
 export async function addContactToJoinedList(
@@ -63,10 +65,11 @@ export async function addContactToJoinedList(
       CITY: contact.city,
       PHONE: contact.phone,
       LANG: contact.lang,
+      SIGNUP_TYPE: contact.signupType,
       // Clears any stale marker left by a previous lifecycle of this
       // same email — e.g. someone whose earlier restaurant was purged
       // would otherwise still read SUBSCRIPTION_STATUS="deleted" here.
-      SUBSCRIPTION_STATUS: "active",
+      SUBSCRIPTION_STATUS: contact.signupType === "comped" ? "comped" : "active",
     },
     apiKey,
     `joined: ${contact.restaurantId}`,

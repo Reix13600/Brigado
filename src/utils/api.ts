@@ -104,12 +104,12 @@ export async function fetchAppData(): Promise<AppData> {
   // A blocked tenant's subcollections are denied by security rules, so
   // fetching them here would reject the Promise.all below and surface as
   // the generic "failed to load" error screen — which renders BEFORE the
-  // trial-expired branch in App.tsx and would therefore hide the block
-  // screen (and with it the reactivation sign-in) behind a dead end.
-  // The blocked screen reads none of this data, so skip it entirely.
-  // Note this keys off the same field the rules do, so the two can't
-  // disagree: if the rules deny, this is already returning empties.
-  const blocked = restoData.subscriptionStatus === "trial_expired";
+  // trial-expired/paused branches in App.tsx and would therefore hide the
+  // block screen (and with it the reactivation sign-in / paused notice)
+  // behind a dead end. The blocked screens read none of this data, so
+  // skip it entirely. Must match firestore.rules' tenantBlocked() exactly
+  // (trial_expired OR paused) — if the two disagree, this list is stale.
+  const blocked = restoData.subscriptionStatus === "trial_expired" || restoData.subscriptionStatus === "paused";
   const [entries, advances, scheduledShifts, activeClockIns, announcements, messages, timeOffRequests, swapRequests] = blocked
     ? [[], [], [], [], [], [], [], []] as [
         HourEntry[], CashAdvance[], ScheduledShift[], ActiveClockIn[],

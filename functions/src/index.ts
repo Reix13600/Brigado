@@ -287,6 +287,14 @@ async function provisionRestaurant(
           compedUntil: comped.untilISO,
         }
       : {}),
+    // When this tenant was provisioned. Added 2026-08-13 for the admin
+    // dashboard's Overview tab (signups-over-time) — before this, NO
+    // creation date was stored anywhere on the restaurant doc, so
+    // adminListBusinesses' `joinedAt` silently resolved to null for every
+    // paid signup. Tenants provisioned before this line existed are
+    // backfilled by scripts/backfill-created-at.mjs from their earliest
+    // manager's Firebase Auth creationTime.
+    createdAt: new Date().toISOString(),
     // Seeded at creation so the tenant has a sane value before anyone
     // opens the app (Phase 2 analytics reads this).
     lastActiveAt: new Date().toISOString(),
@@ -965,7 +973,14 @@ export const adminListBusinesses = onCall(async (request) => {
       // "active", matching how the rules and App.tsx treat a missing field.
       status: x.subscriptionStatus || "active",
       plan: derivePlan(x),
-      joinedAt: x.compedGrantedAt || x.createdAt || null,
+      // createdAt is the canonical creation date (written by
+      // provisionRestaurant since 2026-08-13, backfilled for older
+      // tenants). compedGrantedAt is kept as a fallback because comped
+      // tenants provisioned before createdAt existed only have that one.
+      // Still null-able: a tenant that predates both and was never
+      // backfilled has no creation date at all, and the Overview tab
+      // counts those separately rather than guessing a date for them.
+      joinedAt: x.createdAt || x.compedGrantedAt || null,
       lastActiveAt: x.lastActiveAt || null,
       trialExpiredAt: x.trialExpiredAt || null,
       pausedAt: x.pausedAt || null,

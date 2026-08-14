@@ -4,8 +4,13 @@ import { functions } from "../firebase";
 import { signInManagerWithEmail, signInManagerWithGoogle, signOutManager, watchAuthState } from "../utils/auth";
 import logoFull from "../assets/logo-full.png";
 import {
+  ResponsiveContainer, BarChart, Bar, PieChart, Pie, Cell,
+  XAxis, YAxis, CartesianGrid, Tooltip,
+} from "recharts";
+import {
   Building2, Ticket, ShieldCheck, Search, PauseCircle, PlayCircle,
   Trash2, StickyNote, Plus, RefreshCw, LogOut, AlertTriangle, X,
+  LayoutDashboard,
 } from "lucide-react";
 
 // Platform-level Site Manager dashboard at /admin. NOT part of the
@@ -26,7 +31,18 @@ import {
 // of whom read English, and mirroring it into FR would double the
 // surface for no benefit. Customer-facing copy stays bilingual.
 
-type Tab = "businesses" | "codes" | "admins";
+type Tab = "overview" | "businesses" | "codes" | "admins";
+
+/** A one-shot filter handed from the Overview tab's KPI cards to the
+ * Businesses tab. `activity` is a filter dimension the Businesses tab did
+ * not previously have — added here rather than as a parallel mechanism,
+ * so all four filters (search / status / plan / activity) sit in the same
+ * useMemo and compose with each other. */
+export interface BusinessFilter {
+  status?: string;
+  plan?: string;
+  activity?: "24h" | "7d";
+}
 
 interface Business {
   slug: string;
@@ -84,12 +100,127 @@ const STATUS_STYLES: Record<string, string> = {
   trial_expired: "bg-rose-500/10 text-rose-400 border-rose-500/30",
 };
 
+const DAY_MS = 86_400_000;
+
+/** Whether a tenant's lastActiveAt falls inside the given window.
+ *
+ * NOTE this is RECENT ACTIVITY, not live presence. lastActiveAt is
+ * written on app load and throttled to once per 30 minutes per tenant
+ * (see App.tsx), so "active in last 24h" means "someone opened the app",
+ * not "someone is online now". It also only started being written when
+ * Phase 1 deployed (2026-08-13), so tenants that existed before that read
+ * as inactive until someone next opens their app — expected, not a bug. */
+function isActiveWithin(lastActiveAt: string | null, window: "24h" | "7d"): boolean {
+  if (!lastActiveAt) return false;
+  const ms = Date.parse(lastActiveAt);
+  if (isNaN(ms)) return false;
+  return Date.now() - ms <= (window === "24h" ? DAY_MS : 7 * DAY_MS);
+}
+
+/** True when this tenant is a paying customer: `active` AND linked to a
+ * Stripe customer. A tenant with `active` and no Stripe customer is still
+ * inside its trial (or a legacy pre-Stripe tenant like la-vague). */
+const isPaying = (b: Business) => b.status === "active" && b.hasStripe;
+/** `active` with no Stripe link — still trialing, hasn't converted yet. */
+const isTrialing = (b: Business) => b.status === "active" && !b.hasStripe;
+
+/** One tenant's trial outcome, with the date it happened.
+ *
+ * DELIBERATELY SHAPED AS PER-TENANT EVENTS, not a single aggregate count.
+ * Step 3 of Phase 2 only renders a single current stat ("X of Y converted"),
+ * but keeping the underlying data as dated events means a future
+ * trend-over-time chart is a grouping change, not a rewrite: bucket these
+ * by `completedAt` the same way the signups chart buckets by joinedAt.
+ * The stat is simple ON PURPOSE right now — it is not half-finished. */
+interface TrialOutcome {
+  slug: string;
+  converted: boolean;
+  /** When the trial completed. Exact for expiries (trialExpiredAt);
+   * DERIVED for conversions — Stripe's actual conversion moment is not
+   * stored on the tenant doc, so this approximates it as signup + the
+   * 7-day trial length. Good enough to bucket by month; do not present
+   * it as a precise conversion timestamp. */
+  completedAt: string | null;
+}
+
+const TRIAL_DAYS = 7;
+
+/** Builds the per-tenant trial-completion event list.
+ *
+ * "Completed a trial" = the trial ended one way or the other:
+ *   - converted    : now a paying customer (active + Stripe customer)
+ *   - not converted: hit trial_expired without ever converting
+ *
+ * EXCLUDED from the denominator entirely:
+ *   - comped tenants (arrived via bonus code, never had a trial to complete)
+ *   - tenants still inside their trial (outcome not yet known)
+ *   - paused tenants (outcome deferred, not decided)
+ *   - trial_expired tenants whose deletionReason is "comped_expired"
+ *     (their free comp ran out — again, never a trial)
+ *
+ * CAVEAT worth knowing: a trial_expired tenant with
+ * deletionReason === "admin_delete" IS counted as "did not convert".
+ * That's usually right (admins delete dead trials), but an admin deleting
+ * a paying customer would also land here. At current volume that's
+ * inspectable by hand; revisit if admin deletions ever become common. */
+function trialOutcomes(rows: Business[]): TrialOutcome[] {
+  const out: TrialOutcome[] = [];
+  for (const b of rows) {
+    if (isPaying(b)) {
+      const joined = b.joinedAt ? Date.parse(b.joinedAt) : NaN;
+      out.push({
+        slug: b.slug,
+        converted: true,
+        completedAt: isNaN(joined) ? null : new Date(joined + TRIAL_DAYS * DAY_MS).toISOString(),
+      });
+    } else if (b.status === "trial_expired" && b.deletionReason !== "comped_expired") {
+      out.push({ slug: b.slug, converted: false, completedAt: b.trialExpiredAt });
+    }
+  }
+  return out;
+}
+
 export default function AdminDashboard() {
   const [authReady, setAuthReady] = useState(false);
   const [signedIn, setSignedIn] = useState(false);
   const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
   const [adminEmail, setAdminEmail] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>("businesses");
+  // Opens on the summary, not a list — dashboards conventionally do.
+  const [tab, setTab] = useState<Tab>("overview");
+
+  // ── Shared business data ─────────────────────────────────────────────
+  // Lifted out of BusinessesTab so the Overview tab computes its KPIs and
+  // charts from the SAME adminListBusinesses response rather than issuing
+  // a second, duplicate query. Switching tabs no longer refetches either.
+  const [businesses, setBusinesses] = useState<Business[] | null>(null);
+  const [businessesErr, setBusinessesErr] = useState("");
+
+  const loadBusinesses = useCallback(async () => {
+    setBusinessesErr("");
+    try {
+      const res = await call<{ businesses: Business[] }>("adminListBusinesses")({});
+      setBusinesses(res.data.businesses);
+    } catch (e) {
+      setBusinessesErr((e as Error).message || "Failed to load");
+      setBusinesses([]);
+    }
+  }, []);
+
+  // Only fetch once admin status is confirmed — an unauthorised caller
+  // would just get permission-denied from the callable anyway.
+  useEffect(() => {
+    if (isAdmin) void loadBusinesses();
+  }, [isAdmin, loadBusinesses]);
+
+  // Set by the Overview tab's clickable KPI cards to jump into the
+  // Businesses tab pre-filtered. Consumed once, then cleared, so it acts
+  // as a one-shot instruction rather than a sticky filter the user can't
+  // clear from inside the Businesses tab.
+  const [pendingFilter, setPendingFilter] = useState<BusinessFilter | null>(null);
+  const applyFilterAndShowBusinesses = useCallback((f: BusinessFilter) => {
+    setPendingFilter(f);
+    setTab("businesses");
+  }, []);
 
   // Re-checks admin status against the server whenever the auth state
   // changes — including on first load, so a stale browser session cannot
@@ -155,6 +286,7 @@ export default function AdminDashboard() {
 
       <nav className="flex gap-1 border-b border-slate-800 px-4 sm:px-6">
         {([
+          ["overview", "Overview", LayoutDashboard],
           ["businesses", "Businesses", Building2],
           ["codes", "Bonus Codes", Ticket],
           ["admins", "Admins", ShieldCheck],
@@ -173,7 +305,23 @@ export default function AdminDashboard() {
       </nav>
 
       <main className="p-4 sm:p-6">
-        {tab === "businesses" && <BusinessesTab />}
+        {tab === "overview" && (
+          <OverviewTab
+            rows={businesses}
+            err={businessesErr}
+            onRefresh={loadBusinesses}
+            onDrillDown={applyFilterAndShowBusinesses}
+          />
+        )}
+        {tab === "businesses" && (
+          <BusinessesTab
+            rows={businesses}
+            err={businessesErr}
+            onRefresh={loadBusinesses}
+            incomingFilter={pendingFilter}
+            onFilterConsumed={() => setPendingFilter(null)}
+          />
+        )}
         {tab === "codes" && <BonusCodesTab />}
         {tab === "admins" && <AdminsTab />}
       </main>
@@ -246,29 +394,268 @@ function SignIn() {
   );
 }
 
+// ── OVERVIEW ──────────────────────────────────────────────────────────
+
+/** Recharts styling to match StatsPage.tsx's dark-theme chart treatment —
+ * the admin dashboard is dark-only, so these are constants rather than
+ * theme-derived like StatsPage's equivalents. */
+const CHART_GRID = "#1e293b";
+const CHART_AXIS = "#64748b";
+const TOOLTIP_STYLE = { background: "#0f172a", border: "1px solid #1e293b", borderRadius: 12, fontSize: 12 };
+const TOOLTIP_LABEL = { color: "#e2e8f0", fontWeight: 700 };
+const TOOLTIP_ITEM = { color: "#cbd5e1" };
+
+/** Colours mirror STATUS_STYLES so a status reads the same in the chart
+ * and in the Businesses list. */
+const BREAKDOWN_COLORS: Record<string, string> = {
+  Paying: "#a3e635",
+  Trial: "#38bdf8",
+  Comped: "#818cf8",
+  Paused: "#fbbf24",
+  "Pending deletion": "#f43f5e",
+};
+
+function KpiCard({ label, value, hint, tone, onClick }: {
+  label: string;
+  value: number | string;
+  hint?: string;
+  tone?: "default" | "warn" | "danger";
+  onClick?: () => void;
+}) {
+  const toneClass =
+    tone === "danger" ? "text-rose-400" : tone === "warn" ? "text-amber-300" : "text-slate-100";
+  const interactive = !!onClick;
+  const Element = (interactive ? "button" : "div") as "button" | "div";
+  return (
+    <Element
+      {...(interactive ? { onClick, type: "button" as const } : {})}
+      className={`rounded-2xl border border-slate-800 bg-slate-900/40 p-4 text-left ${
+        interactive ? "cursor-pointer transition-colors hover:border-lime-400/40 hover:bg-slate-900/70 focus:outline-none focus-visible:ring-2 focus-visible:ring-lime-400" : ""
+      }`}
+    >
+      <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">{label}</div>
+      <div className={`mt-1 text-2xl font-bold ${toneClass}`}>{value}</div>
+      {hint && <div className="mt-0.5 text-[11px] text-slate-600">{hint}</div>}
+    </Element>
+  );
+}
+
+function OverviewTab({ rows, err, onRefresh, onDrillDown }: {
+  rows: Business[] | null;
+  err: string;
+  onRefresh: () => Promise<void> | void;
+  onDrillDown: (f: BusinessFilter) => void;
+}) {
+  // Everything below is derived from the SAME rows the Businesses tab
+  // renders — no extra query. useMemo keeps the derivation off the render
+  // path for repeat renders; at realistic tenant counts (tens to low
+  // thousands) these are trivial single passes over an in-memory array,
+  // so this never blocks the dashboard's initial paint.
+  const kpis = useMemo(() => {
+    const r = rows ?? [];
+    return {
+      total: r.length,
+      paying: r.filter(isPaying).length,
+      trialing: r.filter(isTrialing).length,
+      comped: r.filter(b => b.status === "comped").length,
+      paused: r.filter(b => b.status === "paused").length,
+      pendingDeletion: r.filter(b => b.status === "trial_expired").length,
+      active24h: r.filter(b => isActiveWithin(b.lastActiveAt, "24h")).length,
+      active7d: r.filter(b => isActiveWithin(b.lastActiveAt, "7d")).length,
+    };
+  }, [rows]);
+
+  // Signups per MONTH over the last 12 months.
+  //
+  // Monthly (not weekly) is a deliberate choice for the current data
+  // shape: production holds a single tenant dating from Jul 2026, so a
+  // 12-week window would render one bar in eleven empty slots. Monthly
+  // buckets stay readable while volume is low and remain sensible as it
+  // grows; revisit to weekly once signups-per-week is routinely > 0.
+  const signups = useMemo(() => {
+    const now = new Date();
+    const buckets: { key: string; label: string; signups: number }[] = [];
+    for (let i = 11; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      buckets.push({
+        key: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`,
+        label: d.toLocaleDateString("en-GB", { month: "short" }),
+        signups: 0,
+      });
+    }
+    const index = new Map(buckets.map((b, i) => [b.key, i]));
+    let undated = 0;
+    for (const b of rows ?? []) {
+      if (!b.joinedAt) { undated++; continue; }
+      const d = new Date(b.joinedAt);
+      if (isNaN(d.getTime())) { undated++; continue; }
+      const i = index.get(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
+      if (i !== undefined) buckets[i].signups++;
+    }
+    return { buckets, undated };
+  }, [rows]);
+
+  const breakdown = useMemo(() => {
+    const r = rows ?? [];
+    return [
+      { name: "Paying", value: r.filter(isPaying).length },
+      { name: "Trial", value: r.filter(isTrialing).length },
+      { name: "Comped", value: r.filter(b => b.status === "comped").length },
+      { name: "Paused", value: r.filter(b => b.status === "paused").length },
+      { name: "Pending deletion", value: r.filter(b => b.status === "trial_expired").length },
+    ].filter(s => s.value > 0);
+  }, [rows]);
+
+  const conversion = useMemo(() => {
+    const outcomes = trialOutcomes(rows ?? []);
+    const converted = outcomes.filter(o => o.converted).length;
+    return { converted, completed: outcomes.length };
+  }, [rows]);
+
+  if (rows === null) return <p className="text-sm text-slate-500">Loading overview…</p>;
+
+  return (
+    <div className="space-y-6">
+      {err && <p className="text-xs text-rose-400">{err}</p>}
+
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-bold text-slate-300">Platform overview</h2>
+        <button onClick={() => { void onRefresh(); }} aria-label="Refresh"
+          className="p-2 rounded-xl border border-slate-800 text-slate-400 hover:text-lime-400">
+          <RefreshCw size={15} strokeWidth={1.5} />
+        </button>
+      </div>
+
+      {/* Row 1 */}
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <KpiCard label="Total businesses" value={kpis.total} hint="all time" />
+        <KpiCard label="Currently active" value={kpis.paying} hint="paying (Stripe linked)" />
+        <KpiCard label="Currently on trial" value={kpis.trialing} hint="no Stripe customer yet" />
+        <KpiCard label="Comped" value={kpis.comped} hint="free via bonus code" />
+      </div>
+
+      {/* Row 2 */}
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <KpiCard label="Paused" value={kpis.paused} tone={kpis.paused ? "warn" : "default"} hint="admin-paused" />
+        <KpiCard label="Pending deletion" value={kpis.pendingDeletion} tone={kpis.pendingDeletion ? "danger" : "default"} hint="in 30-day window" />
+        <KpiCard
+          label="Active in last 24h" value={kpis.active24h} hint="opened the app · click to filter"
+          onClick={() => onDrillDown({ activity: "24h" })}
+        />
+        <KpiCard
+          label="Active in last 7 days" value={kpis.active7d} hint="opened the app · click to filter"
+          onClick={() => onDrillDown({ activity: "7d" })}
+        />
+      </div>
+
+      {/* Conversion — a single current stat by design; see trialOutcomes(). */}
+      <div className="rounded-2xl border border-slate-800 bg-slate-900/40 p-4">
+        <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Trial → paid conversion</div>
+        {conversion.completed === 0 ? (
+          <>
+            <div className="mt-1 text-2xl font-bold text-slate-400">No completed trials yet</div>
+            <p className="mt-1 text-[11px] text-slate-600">
+              Counts a trial as complete once it either converts to a paying subscription or hits
+              trial_expired. Comped and still-in-trial tenants are excluded.
+            </p>
+          </>
+        ) : (
+          <>
+            <div className="mt-1 text-2xl font-bold text-lime-400">
+              {conversion.converted} of {conversion.completed}
+              <span className="ml-2 text-base font-semibold text-slate-400">
+                ({Math.round((conversion.converted / conversion.completed) * 100)}%)
+              </span>
+            </div>
+            <p className="mt-1 text-[11px] text-slate-600">
+              completed trials converted to paid. Comped and still-in-trial tenants excluded.
+              {conversion.completed < 10 && " Small sample — read the raw counts, not the percentage."}
+            </p>
+          </>
+        )}
+      </div>
+
+      {/* Charts */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <div className="rounded-2xl border border-slate-800 bg-slate-900/40 p-4">
+          <div className="mb-3 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+            Signups — last 12 months
+          </div>
+          <ResponsiveContainer width="100%" height={220}>
+            <BarChart data={signups.buckets}>
+              <CartesianGrid strokeDasharray="3 3" stroke={CHART_GRID} />
+              <XAxis dataKey="label" tick={{ fontSize: 10, fill: CHART_AXIS }} />
+              <YAxis allowDecimals={false} tick={{ fontSize: 10, fill: CHART_AXIS }} />
+              <Tooltip contentStyle={TOOLTIP_STYLE} labelStyle={TOOLTIP_LABEL} itemStyle={TOOLTIP_ITEM} cursor={{ fill: "#1e293b40" }} />
+              <Bar dataKey="signups" fill="#a3e635" radius={[4, 4, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+          {signups.undated > 0 && (
+            <p className="mt-2 text-[11px] text-amber-300/80">
+              {signups.undated} tenant{signups.undated === 1 ? "" : "s"} without a signup date, not shown.
+              Run <code className="text-slate-400">scripts/backfill-created-at.mjs</code> to reconstruct.
+            </p>
+          )}
+        </div>
+
+        <div className="rounded-2xl border border-slate-800 bg-slate-900/40 p-4">
+          <div className="mb-3 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+            Current status breakdown
+          </div>
+          {breakdown.length === 0 ? (
+            <p className="py-16 text-center text-sm text-slate-600">No businesses yet.</p>
+          ) : (
+            <ResponsiveContainer width="100%" height={220}>
+              <PieChart>
+                <Pie data={breakdown} dataKey="value" nameKey="name" innerRadius={55} outerRadius={85} paddingAngle={2}>
+                  {breakdown.map(s => <Cell key={s.name} fill={BREAKDOWN_COLORS[s.name] ?? "#64748b"} />)}
+                </Pie>
+                <Tooltip contentStyle={TOOLTIP_STYLE} labelStyle={TOOLTIP_LABEL} itemStyle={TOOLTIP_ITEM} />
+              </PieChart>
+            </ResponsiveContainer>
+          )}
+          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
+            {breakdown.map(s => (
+              <span key={s.name} className="inline-flex items-center gap-1.5 text-[11px] text-slate-400">
+                <span className="h-2 w-2 rounded-full" style={{ background: BREAKDOWN_COLORS[s.name] ?? "#64748b" }} />
+                {s.name} ({s.value})
+              </span>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── BUSINESSES ────────────────────────────────────────────────────────
 
-function BusinessesTab() {
-  const [rows, setRows] = useState<Business[] | null>(null);
-  const [err, setErr] = useState("");
+function BusinessesTab({ rows, err, onRefresh, incomingFilter, onFilterConsumed }: {
+  rows: Business[] | null;
+  err: string;
+  onRefresh: () => Promise<void> | void;
+  incomingFilter: BusinessFilter | null;
+  onFilterConsumed: () => void;
+}) {
   const [q, setQ] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [planFilter, setPlanFilter] = useState("all");
+  const [activityFilter, setActivityFilter] = useState<"all" | "24h" | "7d">("all");
   const [pausing, setPausing] = useState<Business | null>(null);
   const [deleting, setDeleting] = useState<Business | null>(null);
   const [noting, setNoting] = useState<Business | null>(null);
 
-  const load = useCallback(async () => {
-    setErr("");
-    try {
-      const res = await call<{ businesses: Business[] }>("adminListBusinesses")({});
-      setRows(res.data.businesses);
-    } catch (e) {
-      setErr((e as Error).message || "Failed to load");
-      setRows([]);
-    }
-  }, []);
-  useEffect(() => { load(); }, [load]);
+  // Apply a filter handed over from an Overview KPI card, then clear it
+  // upstream so it doesn't re-apply every time this tab re-renders (which
+  // would make the filter dropdowns impossible to change by hand).
+  useEffect(() => {
+    if (!incomingFilter) return;
+    setQ("");
+    setStatusFilter(incomingFilter.status ?? "all");
+    setPlanFilter(incomingFilter.plan ?? "all");
+    setActivityFilter(incomingFilter.activity ?? "all");
+    onFilterConsumed();
+  }, [incomingFilter, onFilterConsumed]);
 
   const planBucket = (p: string) => (p.startsWith("Comped") ? "comped" : p === "Trial" ? "trial" : "paid");
 
@@ -279,9 +666,10 @@ function BusinessesTab() {
       if (needle && !b.name.toLowerCase().includes(needle) && !b.slug.toLowerCase().includes(needle)) return false;
       if (statusFilter !== "all" && b.status !== statusFilter) return false;
       if (planFilter !== "all" && planBucket(b.plan) !== planFilter) return false;
+      if (activityFilter !== "all" && !isActiveWithin(b.lastActiveAt, activityFilter)) return false;
       return true;
     });
-  }, [rows, q, statusFilter, planFilter]);
+  }, [rows, q, statusFilter, planFilter, activityFilter]);
 
   return (
     <div className="space-y-4">
@@ -308,7 +696,15 @@ function BusinessesTab() {
           <option value="trial">Trial</option>
           <option value="comped">Comped</option>
         </select>
-        <button onClick={load} aria-label="Refresh" className="p-2 rounded-xl border border-slate-800 text-slate-400 hover:text-lime-400">
+        {/* Added with the Overview tab so its "Active in last 24h / 7d"
+            cards have something to drill into. Also usable on its own. */}
+        <select value={activityFilter} onChange={e => setActivityFilter(e.target.value as "all" | "24h" | "7d")}
+          className="bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-sm">
+          <option value="all">Any activity</option>
+          <option value="24h">Active last 24h</option>
+          <option value="7d">Active last 7d</option>
+        </select>
+        <button onClick={() => { void onRefresh(); }} aria-label="Refresh" className="p-2 rounded-xl border border-slate-800 text-slate-400 hover:text-lime-400">
           <RefreshCw size={15} strokeWidth={1.5} />
         </button>
       </div>
@@ -346,7 +742,7 @@ function BusinessesTab() {
                   <StickyNote size={14} strokeWidth={1.5} />
                 </button>
                 {b.status === "paused" ? (
-                  <button onClick={async () => { await call("adminResumeBusiness")({ slug: b.slug }); load(); }}
+                  <button onClick={async () => { await call("adminResumeBusiness")({ slug: b.slug }); void onRefresh(); }}
                     title="Resume" aria-label="Resume"
                     className="p-2 rounded-lg border border-slate-800 text-slate-400 hover:text-lime-400">
                     <PlayCircle size={14} strokeWidth={1.5} />
@@ -369,9 +765,9 @@ function BusinessesTab() {
         ))}
       </div>
 
-      {pausing && <PauseDialog business={pausing} onClose={() => setPausing(null)} onDone={() => { setPausing(null); load(); }} />}
-      {deleting && <DeleteDialog business={deleting} onClose={() => setDeleting(null)} onDone={() => { setDeleting(null); load(); }} />}
-      {noting && <NotesDialog business={noting} onClose={() => setNoting(null)} onDone={() => { setNoting(null); load(); }} />}
+      {pausing && <PauseDialog business={pausing} onClose={() => setPausing(null)} onDone={() => { setPausing(null); void onRefresh(); }} />}
+      {deleting && <DeleteDialog business={deleting} onClose={() => setDeleting(null)} onDone={() => { setDeleting(null); void onRefresh(); }} />}
+      {noting && <NotesDialog business={noting} onClose={() => setNoting(null)} onDone={() => { setNoting(null); void onRefresh(); }} />}
     </div>
   );
 }

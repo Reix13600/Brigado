@@ -65,6 +65,13 @@ export interface GeneralConfig {
   resto_name: string;
   manager_pin: string;
   overtime_limit: number;
+  // Clock-in/out grace window in minutes, per restaurant. Feeds the
+  // tolerance-aware effective-hours calculation in
+  // src/utils/effectiveHours.ts — see the tolerance rule in CLAUDE.md.
+  // Unset = DEFAULT_TOLERANCE_MINUTES (10). NOT yet used by the live
+  // payroll export; Phase A builds the calculation, a later phase wires
+  // it in after validation.
+  tolerance_minutes?: number;
   // tax_rate is the SUM of all deductions[].rate — kept in sync whenever
   // deductions change, so every existing calculation that reads tax_rate
   // (Payroll, Stats, CSV export, the weekly digest) keeps working

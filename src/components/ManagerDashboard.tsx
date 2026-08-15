@@ -21,6 +21,7 @@ import logoIcon from "../assets/logo-icon.png";
 import { getRoleColor } from "../utils/roleColors";
 import { COMPLIANCE_RULES, isRuleEnabled, defaultComplianceRules, NOT_TRACKED_EN, NOT_TRACKED_FR, ComplianceCategory } from "../utils/compliance";
 import { getFrenchHoliday } from "../utils/holidays";
+import { DEFAULT_TOLERANCE_MINUTES, resolveToleranceMinutes } from "../utils/effectiveHours";
 import { 
   saveConfig, saveStaff, saveEntry, deleteEntry, approveAllEntries, 
   approveEntriesByRole, saveAdvance, deleteAdvance, saveDayNote, saveWeekNote, clearAllData,
@@ -173,6 +174,9 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
   const [restoName, setRestoName] = useState<string>("");
   const [newManagerPin, setNewManagerPin] = useState<string>("");
   const [overtimeLimit, setOvertimeLimit] = useState<number>(35);
+  // Clock-in/out grace window. Phase A: stored and editable here, but
+  // NOT yet applied to the live payroll totals — see effectiveHours.ts.
+  const [toleranceMinutes, setToleranceMinutes] = useState<number>(DEFAULT_TOLERANCE_MINUTES);
   const [taxRate, setTaxRate] = useState<number>(22);
   const [deductions, setDeductions] = useState<Deduction[]>([{ id: "tax", label: "Tax", rate: 22 }]);
   const [approvalRequired, setApprovalRequired] = useState<boolean>(true);
@@ -274,6 +278,7 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
     if (appData) {
       setRestoName(appData.config.resto_name);
       setOvertimeLimit(appData.config.overtime_limit);
+      setToleranceMinutes(resolveToleranceMinutes(appData.config));
       setTaxRate(appData.config.tax_rate);
       setDeductions(
         appData.config.deductions && appData.config.deductions.length > 0
@@ -478,8 +483,12 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
     try {
       const summedTaxRate = deductions.reduce((s, d) => s + (Number(d.rate) || 0), 0);
       const updated: Partial<GeneralConfig> = { 
-        resto_name: restoName, 
-        overtime_limit: overtimeLimit, 
+        resto_name: restoName,
+        overtime_limit: overtimeLimit,
+        // Clamped to a sane range: negative is meaningless and anything
+        // beyond an hour stops being a "grace window" and starts silently
+        // rewriting real shifts.
+        tolerance_minutes: Math.max(0, Math.min(60, Math.round(Number(toleranceMinutes) || 0))),
         tax_rate: summedTaxRate,
         deductions: deductions,
         enable_scheduling: enableScheduling,
@@ -3771,6 +3780,29 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                   <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1.5">{t("weeklyOTLimit")}</label>
                   <input className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-slate-200 focus:outline-none focus:border-lime-400/50" type="number" value={overtimeLimit} onChange={e => setOvertimeLimit(Number(e.target.value))} />
                   <span className="text-[10px] text-slate-500 block mt-1">{t("franceStandard")}</span>
+                </div>
+                <div>
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1.5">
+                    {lang === "fr" ? "Tolérance de pointage (minutes)" : "Clock-in tolerance (minutes)"}
+                  </label>
+                  <input
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-slate-200 focus:outline-none focus:border-lime-400/50"
+                    type="number"
+                    min={0}
+                    max={60}
+                    value={toleranceMinutes}
+                    onChange={e => setToleranceMinutes(Number(e.target.value))}
+                  />
+                  <span className="text-[10px] text-slate-500 block mt-1">
+                    {lang === "fr"
+                      ? "Marge autour de l'horaire prévu : un pointage dans cette marge est arrondi en faveur de l'employé. Au-delà, l'heure réelle est conservée. Par défaut 10 min."
+                      : "Grace window around the scheduled time: a punch within it is rounded in the employee's favour. Outside it, the actual time stands. Default 10 min."}
+                  </span>
+                  <span className="text-[10px] text-amber-300/70 block mt-1">
+                    {lang === "fr"
+                      ? "Pas encore appliqué à la paie — préparation pour une prochaine version."
+                      : "Not yet applied to payroll — groundwork for an upcoming release."}
+                  </span>
                 </div>
                 <div>
                   <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1.5">

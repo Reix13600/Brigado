@@ -27,6 +27,64 @@ Staff hours, roster, and payroll SaaS for French restaurants (HCR sector). Built
 * Messages auto-delete after 30 days (`cleanupOldMessages` scheduled function) — private chat only, NOT announcements, NOT entries/payroll (those are kept indefinitely, no retention automation built yet beyond the 5-year staff-deletion gate above).
 * Bilingual pattern: most newer components use inline `lang === "fr" ? "..." : "..."` rather than the `translations.ts` dictionary (which covers older/core UI). Both patterns coexist; match whichever pattern the file you're editing already uses.
 
+## Scheduling/payroll series — PHASE A: tolerance-aware effective hours (2026-08-15)
+
+**This is Phase A of a multi-phase build.** Later phases — the **variance view**, **weekly hours counter**, **shift-template tray**, **overtime warning**, **no-show alerts**, and the **payroll-ready screen** — all consume `src/utils/effectiveHours.ts` rather than reimplementing the maths. That module exists *before* any of those UI features so there is exactly one definition of "effective hours" in the codebase. If you're reading this wondering why a calculation exists with no UI on top of it: that's why, it's deliberate.
+
+### ⚠️ NOT wired into the live payroll export — on purpose
+
+The existing payroll CSV/bookkeeper export still sums raw `HourEntry.hours` exactly as it always has. **Nothing about current payroll numbers changed in Phase A.** The tolerance calculation must be validated against real data in Phase B's variance view (which shows effective vs actual side by side) *before* it is allowed to move real pay figures. Do not "finish the job" by wiring `effectiveHours` into `triggerExportPayrollCSV` without that validation step.
+
+### The tolerance rule (easy to get backwards — implement exactly)
+
+`toleranceMinutes` is a per-restaurant grace window. At each edge of a shift:
+
+* **Clock-IN**, when `|actual − scheduled| <= tolerance` → `effectiveStart` = the **EARLIER** of the two. Outside tolerance → **actual, raw**.
+* **Clock-OUT**, when `|actual − scheduled| <= tolerance` → `effectiveEnd` = the **LATER** of the two. Outside tolerance → **actual, raw**.
+
+Within tolerance it is generous to the employee at both edges; outside tolerance there is no adjustment in either direction. Worked examples (scheduled 09:00–17:00, tolerance 10 min), all covered by tests:
+
+| Punch | Within tolerance? | Effective |
+|---|---|---|
+| in 08:55 (early) | yes | **08:55** (earlier of the two) |
+| in 09:04 (late) | yes | **09:00** (earlier of the two) |
+| in 09:15 (late) | **no** | **09:15** raw |
+| out 17:04 (late) | yes | **17:04** (later of the two) |
+| out 16:56 (early) | yes | **17:00** (later of the two) |
+| out 16:40 (early) | **no** | **16:40** raw |
+
+Boundary is inclusive (`<=`): exactly ±10 min counts as *within*. A tolerance of `0` is meaningful and preserved (no adjustment ever) — only negative/NaN falls back to the default.
+
+### Raw clock data is NEVER mutated
+
+Every function in `effectiveHours.ts` is **pure and computed at read/export time**. It never writes to Firestore and never mutates its arguments. `HourEntry.shifts[].startTime/endTime` — written by `clockOut()` in `api.ts` — is the legal record of what actually happened and stays byte-identical; "effective hours" is a *derived* number for pay/reporting only. A later phase needs the raw actual time to show true deviations, so this is load-bearing, not stylistic. Tests assert it explicitly (repeat calls identical, deep-frozen inputs accepted, `entry.hours` unchanged after computation).
+
+### Where things live
+
+* **`toleranceMinutes`** → `GeneralConfig.tolerance_minutes` (optional). Default **10** (`DEFAULT_TOLERANCE_MINUTES`, mirrored in `api.ts`'s `DEFAULT_CONFIG`). Edited in **Settings → "Hours & tax"**, directly under the weekly OT limit — hours-related settings stay in one card. Clamped 0–60 on save. The field carries a visible FR/EN note that it is not yet applied to payroll, so a manager changing it doesn't expect their numbers to move.
+* **Overtime threshold reuses the existing source of truth** — `getContractHours()` mirrors `ManagerDashboard`'s function exactly: `member?.contract || config.overtime_limit` (which itself defaults to 35). **No new 35h constant was introduced.** Note the `||` (not `??`) is *deliberately* duplicated: a `0` contract falls through to the config value, matching current live behaviour. Changing it to `??` would silently alter existing overtime numbers.
+
+### Two things Step 0 established about the data model (verified 2026-08-15, not assumed)
+
+1. **There is NO stored link between a scheduled shift and its clock record.** `HourEntry` has no `scheduledShiftId`; `ScheduledShift.id` is a `string` while `HourEntry.id` is a `number`. Pairing is *derived*: same `name` + `date`, then greedy **nearest-start-time** matching, each scheduled shift consumed at most once. This handles split shifts (09:00–14:00 + 18:00–23:00) regardless of clock order, and leaves surplus clock records unscheduled.
+2. **The payroll export never consulted the schedule at all** — it sums `HourEntry.hours`, which `clockOut()` derives purely from actual clock-in→clock-out. So Phase A did not have an existing matcher to align with; it built the first one.
+
+**Unscheduled shifts use raw actual times** (no schedule ⇒ no adjustment is even definable), and are flagged `unscheduled: true` for Phase B. A consequence worth knowing: a restaurant that never uses scheduling gets effective totals **identical** to its current payroll.
+
+### Known gap this phase surfaced — no manager audit trail on hour edits
+
+`correctionNote`/`correctionAt` are written **only by `StaffDashboard`** (a staff member *requesting* a fix) and are **cleared when a manager approves**. The manager's own edit path, `saveInlineEdit()`, does `saveEntry({ ...matched, hours })` — **no editor identity, no reason, no timestamp, no previous value retained**. So there is currently no record of who changed an hours figure or why. Flagged here because a later phase in this series depends on it; it is a real gap, not an oversight of this phase.
+
+### Tests
+
+**`npm test`** (`vitest run`) — **44 test cases / 65 assertions, all passing** as of 2026-08-15. `npm run test:watch` for the watch mode. Covers all six worked examples in both directions, inclusive boundaries, tolerance 0, overnight/cross-midnight shifts, split-shift pairing, immutability, non-worked entry types, contract-threshold precedence, and malformed-data degradation.
+
+**This is the project's first and only test runner.** Vitest was chosen because it reuses the existing `vite.config.ts` — no separate build/transform config to keep in sync — and because more phases in this series will add more tests. It runs pure-Node (no jsdom): `effectiveHours.ts` is deliberately framework-free so it can be exercised without rendering anything. If a later phase needs to test a React component, that's when to add `jsdom`/`@testing-library`, not before.
+
+*(Historical note: Phase A originally shipped these as a dependency-free `tsx` script under `npm run test:hours`, to avoid adding a runner for one module. Migrated to vitest immediately afterwards, before Phase B, on the reasoning that it's cheaper to add now than after several phases of tests exist. `tsx` remains a devDependency — the `scripts/brevo-*.ts` tooling still uses it.)*
+
+The test file lives in `src/` but is imported by nothing, so it is **not** bundled (verified against `dist/`).
+
 ## Landing page — "How it works" explainer video (2026-08-12)
 
 * The static chalkboard illustration (`src/assets/how-it-works.webp`) under the hero was replaced by a 10s animated explainer. `src/components/HowItWorksVideo.tsx` owns the whole behaviour; `Landing.tsx` just renders `<HowItWorksVideo />` in the FR branch.
@@ -161,7 +219,7 @@ Verify each step against the Brevo dashboard/API before marking it done — see 
 
 ## Working style established with this project
 
-* Always run `npx tsc --noEmit` and a full `npm run build` (both root app and `functions/` separately) before considering a change done.
+* Always run `npx tsc --noEmit` and a full `npm run build` (both root app and `functions/` separately) before considering a change done. **`npm test` (vitest) is the test runner** — added 2026-08-15 with the scheduling/payroll series; it currently covers `src/utils/effectiveHours.ts` only, so it is a fast check, not a safety net for the rest of the app. `lint` is still just `tsc --noEmit`.
 * Deploys: `firebase deploy --only hosting` for app changes, `firebase deploy --only functions` for Cloud Functions changes (both if both changed). `firebase use brigado-a33b1` to confirm the right project before deploying (there was a past incident of deploying to the wrong Firebase project). The bundled Firebase skills (`.agents/skills/firebase-basics`) say to invoke the CLI as `npx -y firebase-tools@latest` rather than bare `npx firebase-tools`, so the version is pinned to latest rather than whatever happens to be cached.
 * **Functions deploys are flaky near the module-discovery timeout — use `FUNCTIONS_DISCOVERY_TIMEOUT`.** `firebase deploy --only functions` loads `functions/lib/index.js` to enumerate exports, and aborts with *"User code failed to load. Cannot determine backend specification. Timeout after 10000"* if that takes over 10s. **Measured 2026-08-15: the module takes ~8.8s to load on this machine** (firebase-admin + stripe + 25 exports), i.e. only ~1.2s of headroom — which is why the same codebase deploys fine most of the time and then randomly doesn't. It is NOT a CLI-version regression and not caused by any particular code change. Fix: prefix the deploy with `FUNCTIONS_DISCOVERY_TIMEOUT=180`. If module load ever grows past ~10s outright, the real fix is deferring heavy top-level imports, not raising the timeout further.
 * The user (Reix) runs a real restaurant (La Vague, slug `la-vague`) as the pilot customer — treat that restaurant's data/settings as real production data, not a test fixture.

@@ -27,6 +27,8 @@ const DEFAULT_CONFIG: GeneralConfig = {
   resto_name: "La Vague",
   manager_pin: "1234",
   overtime_limit: 35,
+  // Kept in sync with DEFAULT_TOLERANCE_MINUTES in effectiveHours.ts.
+  tolerance_minutes: 10,
   tax_rate: 22,
   deductions: [{ id: "tax", label: "Tax", rate: 22 }],
   approval_required: true,

@@ -8,7 +8,9 @@
     "build": "vite build",
     "preview": "vite preview",
     "seed:manager": "node scripts/seed-manager.mjs",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@getbrevo/brevo": "^6.0.2",
@@ -33,6 +35,7 @@
     "tailwindcss": "^4.1.14",
     "tsx": "^4.23.11",
     "typescript": "~5.8.2",
-    "vite": "^6.2.3"
+    "vite": "^6.2.3",
+    "vitest": "^3.2.7"
   }
 }

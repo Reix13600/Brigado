@@ -23,6 +23,7 @@ import { getRoleColor } from "../utils/roleColors";
 import { COMPLIANCE_RULES, isRuleEnabled, defaultComplianceRules, NOT_TRACKED_EN, NOT_TRACKED_FR, ComplianceCategory } from "../utils/compliance";
 import { getFrenchHoliday } from "../utils/holidays";
 import { DEFAULT_TOLERANCE_MINUTES, resolveToleranceMinutes } from "../utils/effectiveHours";
+import { computePlannedWeekTotal, projectDraftShift, DraftShift } from "../utils/plannedHours";
 import {
   saveConfig, saveStaff, saveEntry, deleteEntry, approveAllEntries,
   approveEntriesByRole, saveAdvance, deleteAdvance, saveDayNote, saveWeekNote, clearAllData,
@@ -1274,6 +1275,27 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
     }
     return dates;
   };
+
+  // ── PHASE C: live planned-hours counter ─────────────────────────────
+  // The Rota Total column reads from THIS list, not from
+  // appData.scheduledShifts directly, so the counter reflects the shift
+  // currently being composed in the modal *before* it is saved — the
+  // manager sees "38/35h" while still deciding, not after committing.
+  // With the modal closed this is the saved list by reference (no copy).
+  //
+  // Note this deliberately covers the modal's add/edit draft only. Drag-
+  // moves and deletes have no pre-save draft state to preview — they
+  // write immediately — so the counter updates when they complete.
+  const scheduleDraftShift: DraftShift | null = scheduleModalOpen
+    ? {
+        id: selectedScheduleShift ? selectedScheduleShift.id : null,
+        name: scheduleForm.name,
+        date: scheduleForm.date,
+        startTime: scheduleForm.startTime,
+        endTime: scheduleForm.endTime,
+      }
+    : null;
+  const projectedScheduledShifts = projectDraftShift(appData.scheduledShifts || [], scheduleDraftShift);
 
   const getActiveMonthDetails = () => {
     const today = new Date();
@@ -3103,11 +3125,37 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                         const weekDates = days.map(d => d.dateStr);
                         const shifts = appData.scheduledShifts || [];
                         const staffShifts = shifts.filter(s => s.name === member.name && weekDates.includes(s.date));
-                        const totalScheduledHours = staffShifts.reduce((sum, s) => sum + getShiftHours(s), 0);
 
-                        const otLimit = member.contract;
-                        const exceedsOT = totalScheduledHours > otLimit;
-                        const exceeds48h = totalScheduledHours > 48;
+                        // Phase C: the running counter. Computed from the
+                        // PROJECTED list (saved shifts + any unsaved modal
+                        // draft) so it moves as the manager types, and via
+                        // computePlannedWeekTotal so the contract-vs-
+                        // overtime_limit threshold is the same
+                        // getContractHours() the rest of the app uses.
+                        const plannedTotal = computePlannedWeekTotal(
+                          member.name,
+                          weekDates,
+                          projectedScheduledShifts,
+                          appData.staff,
+                          appData.config,
+                        );
+                        const totalScheduledHours = plannedTotal.plannedHours;
+                        const otLimit = plannedTotal.thresholdHours;
+                        const exceedsOT = plannedTotal.level === "at_or_over_contract";
+                        const exceeds48h = plannedTotal.level === "over_legal_max";
+
+                        // Marks the badge as a forecast rather than a fact:
+                        // this row's total currently includes an unsaved
+                        // draft, so it may not match the visible shift cards
+                        // (which deliberately still show only saved shifts).
+                        const isPreviewingThisRow =
+                          !!scheduleDraftShift &&
+                          weekDates.includes(scheduleDraftShift.date) &&
+                          (scheduleDraftShift.name === member.name ||
+                            // Reassigning an existing shift away from this
+                            // person drops hours from THEIR total too.
+                            (!!scheduleDraftShift.id &&
+                              shifts.some(s => s.id === scheduleDraftShift.id && s.name === member.name)));
 
                         return (
                           <tr key={member.name} className="hover:bg-slate-950/10 group">
@@ -3205,25 +3253,40 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                               );
                             })}
                             
-                            {/* Weekly Summary Column */}
+                            {/* Weekly Summary Column — Phase C running counter */}
                             <td className={`p-4 text-center border-l border-slate-800/40 ${printHideTotals ? "print:hidden" : ""}`}>
-                              <span className={`inline-block font-mono text-xs font-bold px-2 py-1 rounded ${
-                                exceeds48h
-                                  ? "bg-rose-500/10 text-rose-400 border border-rose-500/20 font-extrabold animate-pulse ot-badge-danger"
-                                  : exceedsOT
-                                    ? "bg-amber-500/10 text-amber-400 border border-amber-500/20 ot-badge-warn"
-                                    : "bg-slate-950 text-slate-400"
-                              }`}>
-                                {totalScheduledHours.toFixed(1)}h
+                              <span
+                                title={lang === "fr"
+                                  ? `${totalScheduledHours.toFixed(1)}h planifiées sur ${otLimit}h — heures prévues au planning, pas heures pointées`
+                                  : `${totalScheduledHours.toFixed(1)}h rostered of ${otLimit}h — planned hours, not clocked hours`}
+                                className={`inline-block font-mono text-xs font-bold px-2 py-1 rounded ${
+                                  isPreviewingThisRow ? "ring-1 ring-lime-400/60 " : ""
+                                }${
+                                  exceeds48h
+                                    ? "bg-rose-500/10 text-rose-400 border border-rose-500/20 font-extrabold animate-pulse ot-badge-danger"
+                                    : exceedsOT
+                                      ? "bg-amber-500/10 text-amber-400 border border-amber-500/20 ot-badge-warn"
+                                      : "bg-slate-950 text-slate-400"
+                                }`}>
+                                {totalScheduledHours.toFixed(1)}<span className="opacity-50">/{otLimit}h</span>
                               </span>
+                              {isPreviewingThisRow && (
+                                <span className="block text-[8px] text-lime-400/80 font-bold mt-1 uppercase tracking-wider print:hidden">
+                                  {lang === "fr" ? "aperçu" : "preview"}
+                                </span>
+                              )}
                               {exceeds48h && (
                                 <span className={`block text-[8px] text-rose-400 font-extrabold mt-1.5 uppercase leading-tight ${printHideAlerts ? "print:hidden" : ""}`}>
                                   ⚠️ &gt;48H MAX
                                 </span>
                               )}
-                              {exceedsOT && !exceeds48h && (
+                              {/* Only when genuinely OVER: the counter now
+                                  flags at exactly-on-contract too (35/35h is
+                                  worth noticing — the next shift is
+                                  overtime), but "+0.0h over" would be a lie. */}
+                              {exceedsOT && !exceeds48h && plannedTotal.overBy > 0 && (
                                 <span className={`block text-[10px] text-rose-400 font-black mt-2 leading-tight bg-rose-950/40 border border-rose-500/20 rounded py-0.5 px-1 animate-pulse ${printHideAlerts ? "print:hidden" : ""}`}>
-                                  ⚠️ +{(totalScheduledHours - otLimit).toFixed(1)}h
+                                  ⚠️ +{plannedTotal.overBy.toFixed(1)}h
                                 </span>
                               )}
                             </td>

@@ -26,6 +26,15 @@ export interface HourEntry {
   // True when this entry was submitted without a fresh QR scan (or more
   // than 3 minutes after one) — manager-only signal, staff never see it.
   flagged?: boolean;
+  // Audit trail for a MANAGER's own edit to `hours` (saveInlineEdit). Added
+  // in the variance-view phase, which surfaced that manager edits carried
+  // no editor identity, reason, or previous value — unlike staff-initiated
+  // corrections (correctionNote/correctionAt above). Purely additive: does
+  // not change how hours are saved or calculated.
+  editedBy?: string; // manager email/uid
+  editedAt?: string; // ISO string
+  previousHours?: number; // value being overwritten
+  editReason?: string; // optional free text
 }
 
 export interface StaffMember {
@@ -114,6 +123,23 @@ export interface ScheduledShift {
   note?: string;
 }
 
+// A manager's APPROVAL DECISION for one employee's one day of
+// scheduled-vs-actual variance (see src/utils/variance.ts). The variance
+// numbers themselves are never stored here or anywhere — they're always
+// recomputed live from entries + scheduledShifts, same "pure function, no
+// cached duplicate" discipline as effectiveHours.ts. This doc is only the
+// human decision on top of that live number. Absence of a doc for a given
+// (name, date) means "pending" — there is no separate pending doc.
+// Doc id is a deterministic `${date}__${encodeURIComponent(name)}` key so
+// approve/invalidate can target it directly without a query.
+export interface VarianceApproval {
+  name: string;
+  date: string; // YYYY-MM-DD
+  approvedBy: string; // manager email/uid
+  approvedAt: string; // ISO string
+  note?: string;
+}
+
 // A staff member who has clocked in but not yet clocked out.
 export interface ActiveClockIn {
   name: string;
@@ -191,6 +217,7 @@ export interface AppData {
   announcements: Announcement[];
   messages: PrivateMessage[];
   timeOffRequests: TimeOffRequest[];
+  varianceApprovals: VarianceApproval[];
   swapRequests: SwapRequest[];
   // Set true by the Stripe webhook when a subscription is cancelled.
   // Soft-suspend, not deletion — data stays intact.

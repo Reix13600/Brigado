@@ -2,12 +2,13 @@ import {
   doc, getDoc, setDoc, updateDoc, deleteDoc,
   collection, getDocs, query, where, limit, writeBatch,
 } from "firebase/firestore";
-import { db, getRestaurantId } from "../firebase";
+import { auth, db, getRestaurantId } from "../firebase";
 import { defaultComplianceRules } from "./compliance";
 import { isBlockedStatus } from "./tenantStatus";
+import { varianceApprovalId } from "./variance";
 import {
   AppData, GeneralConfig, StaffMember, HourEntry, CashAdvance, ScheduledShift, ActiveClockIn, Shift,
-  Announcement, PrivateMessage, TimeOffRequest, SwapRequest,
+  Announcement, PrivateMessage, TimeOffRequest, SwapRequest, VarianceApproval,
 } from "../types";
 
 // These are functions, not constants — RESTAURANT_ID is resolved fresh on
@@ -22,6 +23,7 @@ const announcementsCol = () => collection(db, "restaurants", getRestaurantId(), 
 const messagesCol = () => collection(db, "restaurants", getRestaurantId(), "messages");
 const timeOffCol = () => collection(db, "restaurants", getRestaurantId(), "timeOffRequests");
 const swapCol = () => collection(db, "restaurants", getRestaurantId(), "swapRequests");
+const varianceApprovalsCol = () => collection(db, "restaurants", getRestaurantId(), "varianceApprovals");
 
 const DEFAULT_CONFIG: GeneralConfig = {
   resto_name: "La Vague",
@@ -91,6 +93,30 @@ async function getAllSwapRequests(): Promise<SwapRequest[]> {
   return snap.docs.map(d => d.data() as SwapRequest).sort((a, b) => b.requestedAt.localeCompare(a.requestedAt));
 }
 
+/**
+ * `varianceApprovals` is manager-only to READ (see firestore.rules) —
+ * unlike every other subcollection here, which any signed-in session can
+ * read. `fetchAppData` is called for EVERY session, staff included, and
+ * runs before anyone has necessarily signed in as a manager (the very
+ * first load of a fresh anonymous staff session, or even a manager's
+ * session before they've completed ManagerDashboard's own internal
+ * auth gate). A `permission-denied` here is therefore the EXPECTED
+ * outcome for most callers, not a real error — swallowing it and
+ * returning [] is what keeps the rest of `fetchAppData`'s Promise.all
+ * from being taken down by a read nobody but a manager needs anyway
+ * (only VarianceTab, itself manager-only UI, consumes this array).
+ * Anything other than permission-denied still throws normally.
+ */
+async function getAllVarianceApprovals(): Promise<VarianceApproval[]> {
+  try {
+    const snap = await getDocs(varianceApprovalsCol());
+    return snap.docs.map(d => d.data() as VarianceApproval);
+  } catch (err: any) {
+    if (err?.code === "permission-denied") return [];
+    throw err;
+  }
+}
+
 export async function fetchAppData(): Promise<AppData> {
   const restoSnap = await getDoc(restoRef());
 
@@ -114,10 +140,10 @@ export async function fetchAppData(): Promise<AppData> {
   // this — see its own comment for why (a real bug shipped from this
   // exact check being duplicated by hand and only one copy updated).
   const blocked = isBlockedStatus(restoData.subscriptionStatus);
-  const [entries, advances, scheduledShifts, activeClockIns, announcements, messages, timeOffRequests, swapRequests] = blocked
-    ? [[], [], [], [], [], [], [], []] as [
+  const [entries, advances, scheduledShifts, activeClockIns, announcements, messages, timeOffRequests, swapRequests, varianceApprovals] = blocked
+    ? [[], [], [], [], [], [], [], [], []] as [
         HourEntry[], CashAdvance[], ScheduledShift[], ActiveClockIn[],
-        Announcement[], PrivateMessage[], TimeOffRequest[], SwapRequest[],
+        Announcement[], PrivateMessage[], TimeOffRequest[], SwapRequest[], VarianceApproval[],
       ]
     : await Promise.all([
         getAllEntries(),
@@ -128,6 +154,7 @@ export async function fetchAppData(): Promise<AppData> {
         getAllMessages(),
         getAllTimeOffRequests(),
         getAllSwapRequests(),
+        getAllVarianceApprovals(),
       ]);
 
   return {
@@ -144,6 +171,7 @@ export async function fetchAppData(): Promise<AppData> {
     messages,
     timeOffRequests,
     swapRequests,
+    varianceApprovals,
     suspended: restoData.suspended === true,
     subscriptionStatus: restoData.subscriptionStatus,
     trialExpiredAt: restoData.trialExpiredAt,
@@ -511,6 +539,57 @@ export async function decideSwap(id: string, approve: boolean): Promise<{ swapRe
 
   const [swapRequests, scheduledShifts] = await Promise.all([getAllSwapRequests(), getAllScheduledShifts()]);
   return { swapRequests, scheduledShifts };
+}
+
+// ── VARIANCE APPROVALS (Phase B) ────────────────────────────────────
+// Only the human approval DECISION is ever persisted here — the variance
+// numbers themselves are always recomputed live from entries +
+// scheduledShifts via src/utils/variance.ts. See VarianceApproval's own
+// doc comment in types.ts.
+
+/**
+ * Approves one employee's one day of variance, with an optional note.
+ * Upsert by construction: writing the deterministic (date, name) doc id
+ * again (e.g. re-approving after a note edit) just overwrites it.
+ */
+export async function approveVarianceDay(name: string, date: string, note?: string): Promise<VarianceApproval[]> {
+  const approval: VarianceApproval = {
+    name,
+    date,
+    approvedBy: auth.currentUser?.email || auth.currentUser?.uid || "unknown",
+    approvedAt: new Date().toISOString(),
+    ...(note?.trim() ? { note: note.trim() } : {}),
+  };
+  await setDoc(doc(varianceApprovalsCol(), varianceApprovalId(date, name)), approval);
+  return getAllVarianceApprovals();
+}
+
+/** Bulk "approve all remaining pending" for one employee — caller (the
+ * UI, via aggregateMonthlyVariance) supplies exactly the dates that are
+ * currently pending for that employee+month; this just writes them all
+ * in one batch rather than recomputing which days qualify. */
+export async function approveAllRemainingVariance(name: string, dates: readonly string[]): Promise<VarianceApproval[]> {
+  const approvedBy = auth.currentUser?.email || auth.currentUser?.uid || "unknown";
+  const approvedAt = new Date().toISOString();
+  const batch = writeBatch(db);
+  dates.forEach(date => {
+    const approval: VarianceApproval = { name, date, approvedBy, approvedAt };
+    batch.set(doc(varianceApprovalsCol(), varianceApprovalId(date, name)), approval);
+  });
+  await batch.commit();
+  return getAllVarianceApprovals();
+}
+
+/**
+ * Deletes a day's approval record, reverting it to pending. Called
+ * whenever that day's underlying hours are edited (see ManagerDashboard's
+ * saveInlineEdit) so an approval can never silently keep applying to
+ * numbers that have since changed. Safe to call unconditionally — deleting
+ * a doc that doesn't exist (the common case: most edited days were never
+ * approved) is a no-op, not an error.
+ */
+export async function invalidateVarianceApproval(name: string, date: string): Promise<void> {
+  await deleteDoc(doc(varianceApprovalsCol(), varianceApprovalId(date, name)));
 }
 
 /**

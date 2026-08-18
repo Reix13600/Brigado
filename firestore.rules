@@ -180,6 +180,15 @@ service cloud.firestore {
         allow read: if isSignedIn() && !tenantBlocked(restaurantId);
         allow write: if isSignedIn() && !tenantBlocked(restaurantId);
       }
+
+      // Phase B (variance approvals): manager-only for READ as well as
+      // write, unlike every other subcollection above. Staff have no
+      // reason to see whether a manager has signed off on a given day's
+      // scheduled-vs-actual delta, so this deliberately does not follow
+      // the "any signed-in visitor can read" default.
+      match /varianceApprovals/{id} {
+        allow read, write: if isManagerOf(restaurantId) && !tenantBlocked(restaurantId);
+      }
     }
   }
 }

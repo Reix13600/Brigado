@@ -29,7 +29,7 @@ Staff hours, roster, and payroll SaaS for French restaurants (HCR sector). Built
 
 ## Scheduling/payroll series — PHASE A: tolerance-aware effective hours (2026-08-15)
 
-**This is Phase A of a multi-phase build.** Later phases — the **variance view**, **weekly hours counter**, **shift-template tray**, **overtime warning**, **no-show alerts**, and the **payroll-ready screen** — all consume `src/utils/effectiveHours.ts` rather than reimplementing the maths. That module exists *before* any of those UI features so there is exactly one definition of "effective hours" in the codebase. If you're reading this wondering why a calculation exists with no UI on top of it: that's why, it's deliberate.
+**This is Phase A of a multi-phase build.** Later phases — the **variance view** (built in Phase B, below), **weekly hours counter**, **shift-template tray**, **overtime warning**, **no-show alerts**, and the **payroll-ready screen** — all consume `src/utils/effectiveHours.ts` rather than reimplementing the maths. That module exists *before* any of those UI features so there is exactly one definition of "effective hours" in the codebase. If you're reading this wondering why a calculation exists with no UI on top of it: that's why, it's deliberate.
 
 ### ⚠️ NOT wired into the live payroll export — on purpose
 
@@ -73,17 +73,107 @@ Every function in `effectiveHours.ts` is **pure and computed at read/export time
 
 ### Known gap this phase surfaced — no manager audit trail on hour edits
 
-`correctionNote`/`correctionAt` are written **only by `StaffDashboard`** (a staff member *requesting* a fix) and are **cleared when a manager approves**. The manager's own edit path, `saveInlineEdit()`, does `saveEntry({ ...matched, hours })` — **no editor identity, no reason, no timestamp, no previous value retained**. So there is currently no record of who changed an hours figure or why. Flagged here because a later phase in this series depends on it; it is a real gap, not an oversight of this phase.
+~~`correctionNote`/`correctionAt` are written **only by `StaffDashboard`**...~~ **FIXED in Phase B** — see that section below. `saveInlineEdit()` now stamps `editedBy`/`editedAt`/`previousHours`/`editReason`.
 
 ### Tests
 
-**`npm test`** (`vitest run`) — **44 test cases / 65 assertions, all passing** as of 2026-08-15. `npm run test:watch` for the watch mode. Covers all six worked examples in both directions, inclusive boundaries, tolerance 0, overnight/cross-midnight shifts, split-shift pairing, immutability, non-worked entry types, contract-threshold precedence, and malformed-data degradation.
+**`npm test`** (`vitest run`) — **62 test cases / 107 assertions, all passing** as of 2026-08-17 (44/65 from this section, 18/42 from Phase B's `variance.test.ts` — see below). `npm run test:watch` for the watch mode. Covers all six worked examples in both directions, inclusive boundaries, tolerance 0, overnight/cross-midnight shifts, split-shift pairing, immutability, non-worked entry types, contract-threshold precedence, and malformed-data degradation.
 
 **This is the project's first and only test runner.** Vitest was chosen because it reuses the existing `vite.config.ts` — no separate build/transform config to keep in sync — and because more phases in this series will add more tests. It runs pure-Node (no jsdom): `effectiveHours.ts` is deliberately framework-free so it can be exercised without rendering anything. If a later phase needs to test a React component, that's when to add `jsdom`/`@testing-library`, not before.
 
 *(Historical note: Phase A originally shipped these as a dependency-free `tsx` script under `npm run test:hours`, to avoid adding a runner for one module. Migrated to vitest immediately afterwards, before Phase B, on the reasoning that it's cheaper to add now than after several phases of tests exist. `tsx` remains a devDependency — the `scripts/brevo-*.ts` tooling still uses it.)*
 
 The test file lives in `src/` but is imported by nothing, so it is **not** bundled (verified against `dist/`).
+
+## Scheduling/payroll series — PHASE B: variance view + approval workflow (2026-08-17)
+
+Second phase of the series introduced in Phase A above. Builds the first UI on top of `effectiveHours.ts`'s matching logic: a **Variance tab** in ManagerDashboard showing scheduled-vs-actual deltas per employee per month, with a manager approval workflow on top. Also closes the audit-trail gap Phase A found.
+
+### Step 0 findings (established before writing any code)
+
+* **New tab, not an extension of StatsPage.** `StatsPage.tsx` is a pure aggregate analytics view (recharts trends/donuts/gauges, no row-level actions). Variance is an operational approve/reject workflow at the individual-day granularity — a fundamentally different interaction shape. A new `"variance"` tab was added to `ManagerDashboard`'s tab list, gated on `enable_scheduling` exactly like the existing `"schedule"` tab (no schedule data ⇒ nothing to compare against). Its own component, `src/components/VarianceTab.tsx`, follows `StatsPage.tsx`'s existing convention of a standalone tab component taking `{ appData, lang, theme, onRefresh }` and calling the API layer directly, rather than growing `ManagerDashboard.tsx` (already ~5000 lines) further.
+* **`effectiveHours.ts` already exposed what Phase B needed — no refactor.** `pairShiftsToSchedule()` already returns the raw matched pairing (which clock record matched which scheduled shift, or `null`) *before* any tolerance rounding, and `EffectiveShift`/`EffectiveDay` already carry `actualStart`/`actualEnd`/`actualHours` (raw) alongside the tolerance-adjusted `effective*` fields. Phase B's `variance.ts` reuses `pairShiftsToSchedule()` directly and never touches the tolerance/effective-hours math at all — see "raw vs. effective hours" below for why that separation matters.
+* **Manager identity**: `auth.currentUser` (imported from `../firebase`) is reliable inside `ManagerDashboard` and `api.ts` — `ManagerDashboard` gates its own content behind an internal Firebase Auth check (`watchAuthState` + `isAuthorizedManager`, lines ~148–158), so by the time any manager-only code runs, `auth.currentUser` is a real, non-anonymous manager account, not a staff anonymous session. `approvedBy`/`editedBy` use `auth.currentUser?.email || auth.currentUser?.uid || "unknown"`.
+* **Subcollection naming**: `varianceApprovals`, matching the project's existing camelCase-plural-noun convention (`entries`, `advances`, `scheduledShifts`, …).
+
+### Raw hours vs. effective hours — two different numbers now exist, on purpose
+
+Variance is computed from **raw actual minutes** (`Shift.hours` as clocked, via `pairShiftsToSchedule`'s output) — **never** Phase A's tolerance-adjusted `effectiveHours`. This is deliberate: variance exists to show a manager the true deviation between what was scheduled and what actually happened, so they can decide whether to approve it. Feeding it tolerance-adjusted numbers would hide small deviations *before* the manager ever saw them — exactly backwards from the point of a review workflow. `effectiveHours.ts` and `variance.ts` therefore read the same underlying clock/schedule data but answer different questions: one is "what should we pay" (tolerance-forgiving, still not wired into payroll — see Phase A), the other is "what actually happened vs. plan" (raw, review-oriented). Do not conflate them or "simplify" by having one call the other's rounded output.
+
+### Variance data model — computed live, only the approval decision persisted
+
+Same "pure function, no cached duplicate" discipline as `effectiveHours.ts`. `src/utils/variance.ts` exports:
+
+* `computeDayVariance(entry, allScheduled)` — one `HourEntry`'s variance against that day's schedule. Returns `null` for non-`"worked"` entries, entries with no shifts, or when every matched pair fell within the 1-minute floor. Reuses `pairShiftsToSchedule` for matching; never duplicates it.
+* `aggregateMonthlyVariance(name, entries, allScheduled, approvals)` — per-employee aggregation over whatever period of entries it's handed (same "caller does its own date-range bucketing" convention as `aggregateEffectiveHours`). Only `status === "approved"` entries participate, mirroring the live payroll export's own filter.
+
+**Nothing about the variance NUMBERS is ever written to Firestore.** The only new persisted state is the human decision: `restaurants/{slug}/varianceApprovals/{date}__{encodeURIComponent(name)}` (`VarianceApproval` in `types.ts`) — `{ name, date, approvedBy, approvedAt, note? }`. Absence of a doc for a given (name, date) means "pending"; there is no separate pending doc. `api.ts` exposes `approveVarianceDay`, `approveAllRemainingVariance` (batch, caller supplies exactly the pending dates from `aggregateMonthlyVariance`), and `invalidateVarianceApproval`.
+
+**The 1-minute floor is a calculation-wide inclusion filter, not just a display filter.** A component is only included in `computeDayVariance`'s output — and therefore counted in `aggregateMonthlyVariance`'s `scheduledHours`/`clockedHours` totals — when `|actualMinutes - scheduledMinutes| >= 1`. This is what guarantees `differenceHours === approvedHours + pendingHours` exactly, with no separate rounding path to drift out of sync. Unscheduled (extra) shifts have no floor applied — a real clock record with no matching schedule is never "noise," regardless of size.
+
+**No-shows are excluded by construction, not by an extra check.** A scheduled shift with zero clock records that day has no `HourEntry` for `computeDayVariance` to even be called on — the caller (`aggregateMonthlyVariance`) iterates `entries`, not `scheduledShifts`, so a true no-show day simply never produces a `DayVariance`. Reserved for a later no-show-alerts phase, per the original spec — do not fold no-show detection into this module.
+
+### Approval-invalidation-on-edit — an approval must never silently apply to changed numbers
+
+`saveInlineEdit()` (ManagerDashboard) now calls `invalidateVarianceApproval(matched.name, matched.date)` **unconditionally** on every hours edit, immediately after `saveEntry()`. Deleting a doc that doesn't exist (the common case — most edited days were never approved) is a harmless no-op, so there's no need to check first. This is the mechanism that keeps an approval from silently continuing to apply after the underlying hours change: any edit to a day's hours reverts that day to pending, full stop, regardless of whether the new value happens to net out the same.
+
+### Fixed: manager-edit audit trail (`saveInlineEdit`)
+
+`HourEntry` gained `editedBy?`, `editedAt?`, `previousHours?`, `editReason?` (optional free text, entered via a small input that appears next to the hours field while editing). `saveInlineEdit()` now stamps all but the reason automatically and passes the reason through when the manager fills it in. **Purely additive** — the hours value itself is saved exactly as before; nothing about how hours are calculated changed. This is separate from `correctionNote`/`correctionAt`, which remain staff-initiated-correction-only.
+
+### Firestore rules — `varianceApprovals` is manager-only for READ, unlike every other subcollection
+
+```
+match /varianceApprovals/{id} {
+  allow read, write: if isManagerOf(restaurantId) && !tenantBlocked(restaurantId);
+}
+```
+
+Every other subcollection (`entries`, `advances`, `scheduledShifts`, …) follows "any signed-in visitor can read, managers write" — deliberately not followed here, since staff have no reason to see whether a manager has signed off on a day's variance. Verified against the Firestore emulator (`scripts/test-variance-rules.mjs`, run via `firebase emulators:exec --only firestore "node scripts/test-variance-rules.mjs"` — not part of `npm test`, needs a live emulator and the `@firebase/rules-unit-testing` devDependency pinned to `^4` to match this project's `firebase@^11`, since `@firebase/rules-unit-testing@5` requires `firebase@^12`, which was NOT upgraded to as part of this phase): 13 checks — manager read/write allowed, anonymous-staff and unauthenticated denied, cross-tenant manager denied, blocked-tenant manager denied, and the invalidation delete (including the no-op-on-absent-doc case) all pass.
+
+### Deliberately out of scope this phase
+
+* **No-shows** — excluded by construction (see above); reserved for a later no-show-alerts phase.
+* **The live payroll export (`triggerExportPayrollCSV`) was not touched.** Same discipline as Phase A: it still sums raw `HourEntry.hours` with zero schedule consultation. Verified by diff — no changes anywhere near that function.
+* **`deleteStaffMemberData`** (the 5-year-retention permanent-erasure path) was not updated to also delete a departing staff member's `varianceApprovals` docs. Minor, known gap — orphaned approval records for a permanently-deleted staff member are not PII-sensitive (they're just a manager's own past sign-off), but worth closing if that function is touched again.
+
+### Spot-checked against production `la-vague` data (2026-08-17)
+
+Hand-verified (not clicked through the live UI — no manager credentials available in this session) against real Firestore documents: **Reigo, 2026-07-16** has a scheduled shift (09:00–15:30, 6.5h) but the clock record only covers 10:00–12:45 (2.75h) → correctly computes **−3h45**. **Reigo, 2026-07-17** has a clock record with no matching scheduled shift that day → correctly falls into "Unscheduled" at the full +5.5h. Anthony has clock records but zero `ScheduledShift` docs anywhere in the tenant → correctly all-Unscheduled. No `ScheduledShift` exists past 2026-08-09 in production, so the tab's default "current month" (August) view shows everything as Unscheduled right now — expected given the data, not a bug.
+
+## Staff-facing "My Schedule" view (2026-08-18)
+
+Staff previously had no dedicated way to see their own upcoming shifts. This section documents what existed before, what was added, and a real bug this work surfaced and fixed in Phase B's `fetchAppData`.
+
+### Step 0 — what already existed (this was NOT a blank slate)
+
+Two pieces of real, if partial, schedule visibility already existed in `StaffDashboard.tsx` before this change — worth knowing so neither gets duplicated by a future phase:
+
+* **"My Weekly Rota"** (`config.enable_scheduling`-gated grid, current week only) — this doubles as the day-picker for the hours-entry form: tapping a *past* day selects it for logging; future days show their scheduled start/end/role but are disabled (can't log hours for a day that hasn't happened). It has no next-week view and was never meant to be a pure "what am I working" screen — logging hours is its primary job.
+* **"My upcoming shifts"** — inside the swap-request ("Cover") tab of the 3-tab "MY SPACE" widget (Messages/Time off/Cover), a flat, unbounded (today onward, no week boundary) list already existed, used so a staff member can pick which of their own shifts to request cover for. Collapsed behind a toggle, and only reachable by opening the Cover tab.
+
+Neither is a substitute for "check my schedule at a glance" — the first is fused into a different task (logging hours), the second is buried inside a different feature (swap requests) and has no week framing. The new **"Mon planning" / "My Schedule"** card is genuinely new UI, but its query logic is NOT new: it reuses the exact same `s.name === selectedStaff && ...date...` matching already established by both pieces above (see "Two things Step 0 established" in Phase A, above — `ScheduledShift` has no staff-ID link, only `name` + `date`; this reuses that fragile-but-established match exactly, no ID-based refactor attempted).
+
+### What was added
+
+* `getWeekDates()` (local to `StaffDashboard.tsx`) gained an optional `weekOffset: number = 0` param — `0` is this week (unchanged default, used everywhere it always was), `1` is next week (used only by the new card). Every existing call site is untouched.
+* A new card, placed right after "Your hours this week" and before the MY SPACE widget — the first thing under the header, since "do I work today" is the single most useful fact on this screen. This-week/next-week toggle, today's row visually distinguished (lime ring + "Aujourd'hui"/"Today" label instead of the weekday name), role shown via the same `getRoleColor` + `t('role...')` pattern used elsewhere in this file, and a small amber "Cover requested" chip reusing `swapRequests` data (filtered to non-denied, unlike the Cover tab's own `myOwnSwapIds` which doesn't filter status — a stale badge on a denied request would be misleading in a read-only view, so this one deliberately differs).
+* **`ScheduledShift` has no `overnight` boolean** (unlike `Shift`, which does — the two are different types; don't confuse them). Overnight is derived the same way `plannedHours.ts`'s `shiftDurationHours` and ManagerDashboard's `getShiftHours` already do: `endTime <= startTime`. Shown as a small amber "+1" suffix on the time range.
+* Empty state — "Pas encore de service prévu." / "No shifts scheduled yet." — matches this file's own established empty-state voice exactly (`text-xs text-slate-500 italic`, same phrasing shape as "Pas encore de messages." elsewhere in this component).
+
+### Real bug found and fixed while verifying this: Phase B broke `fetchAppData` for everyone
+
+Testing this locally (dev server against the live `brigado-a33b1` backend — there is no separate dev project) surfaced `permission-denied` on **every** app load, staff and manager alike. Root cause: Phase B's `fetchAppData()` added `getAllVarianceApprovals()` to its `Promise.all` **unconditionally**, but `varianceApprovals` rules are manager-only for read (`isManagerOf(restaurantId)`). An anonymous staff session — and even a manager's session on the very first load, before they've completed `ManagerDashboard`'s own internal auth gate — is always denied that read. Because `Promise.all` rejects on any single failure, this took down the *entire* app load, not just the variance data: nobody could reach even the staff PIN screen or the manager login form.
+
+**Fixed in `api.ts`**: `getAllVarianceApprovals()` now catches `permission-denied` specifically and returns `[]` — mirroring this codebase's existing "wrapped and logged, never thrown" philosophy (see the Brevo section). A denied read is the *expected* outcome for any non-manager session, not an error; only a manager session (where `isManagerOf()` passes) gets real data back, which is the only session that ever renders `VarianceTab` anyway. Any other error code still throws normally.
+
+This was caught by testing against real data, not by review — worth remembering next time a new subcollection with restricted read access is added to `fetchAppData`'s `Promise.all`: an unconditional add there is only safe when every session type that calls `fetchAppData` can actually read it.
+
+### Deliberate v1 scope — not oversights
+
+* **Live view, not draft/publish.** Shows the schedule exactly as currently saved, the moment a manager saves a shift — no separate "published" state. Matches how "My Weekly Rota" and the Manager Rota Planner already work; introducing a publish step would be a bigger, separate feature.
+* **Own shifts only.** No manager-side "who's working when" cross-staff view was requested or built here — out of scope.
+* **No push notifications.** The view is pull-only (open the app, check). A staff member isn't notified when a new shift is scheduled for them. Reasonable v1 boundary, not a bug — flagged here as a plausible future phase, same as the no-show-alerts / overtime-warning items already noted in the scheduling series above.
 
 ## Landing page — "How it works" explainer video (2026-08-12)
 

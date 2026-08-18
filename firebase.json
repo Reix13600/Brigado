@@ -21,6 +21,11 @@
   "firestore": {
     "rules": "firestore.rules"
   },
+  "emulators": {
+    "firestore": {
+      "port": 8089
+    }
+  },
   "functions": [
     {
       "source": "functions",

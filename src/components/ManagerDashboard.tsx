@@ -7,7 +7,7 @@ import {
   AppData, HourEntry, StaffMember, CashAdvance, GeneralConfig, EntryType, RoleType, ScheduledShift, Deduction, Shift
 } from "../types";
 import { getTranslation, LangType, TRANSLATIONS } from "../utils/translations";
-import { getRestaurantId, functions } from "../firebase";
+import { auth, getRestaurantId, functions } from "../firebase";
 import { httpsCallable } from "firebase/functions";
 import QRCode from "qrcode";
 import QRPoster from "./QRPoster";
@@ -17,17 +17,19 @@ import Timesheet from "./Timesheet";
 import BookkeeperExport from "./BookkeeperExport";
 import InfoTooltip from "./InfoTooltip";
 import StatsPage from "./StatsPage";
+import VarianceTab from "./VarianceTab";
 import logoIcon from "../assets/logo-icon.png";
 import { getRoleColor } from "../utils/roleColors";
 import { COMPLIANCE_RULES, isRuleEnabled, defaultComplianceRules, NOT_TRACKED_EN, NOT_TRACKED_FR, ComplianceCategory } from "../utils/compliance";
 import { getFrenchHoliday } from "../utils/holidays";
 import { DEFAULT_TOLERANCE_MINUTES, resolveToleranceMinutes } from "../utils/effectiveHours";
-import { 
-  saveConfig, saveStaff, saveEntry, deleteEntry, approveAllEntries, 
+import {
+  saveConfig, saveStaff, saveEntry, deleteEntry, approveAllEntries,
   approveEntriesByRole, saveAdvance, deleteAdvance, saveDayNote, saveWeekNote, clearAllData,
   saveScheduledShift, deleteScheduledShift,
   postAnnouncement, deleteAnnouncement, sendMessage, decideTimeOffRequest, decideSwap,
-  saveTimeOffNote, saveSwapNote, deleteStaffMemberData
+  saveTimeOffNote, saveSwapNote, deleteStaffMemberData,
+  invalidateVarianceApproval
 } from "../utils/api";
 import { 
   Users, Calendar, DollarSign, BarChart3, Settings, Clipboard,
@@ -250,6 +252,7 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
   // Inline edit state in Saisies
   const [inlineEditId, setInlineEditId] = useState<number | null>(null);
   const [inlineEditHours, setInlineEditHours] = useState<string>("");
+  const [inlineEditReason, setInlineEditReason] = useState<string>("");
 
   // Schedule Planner States
   const [scheduleOffset, setScheduleOffset] = useState<number>(0);
@@ -1542,8 +1545,20 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
   const startInlineEdit = (e: HourEntry) => {
     setInlineEditId(e.id);
     setInlineEditHours(String(e.hours));
+    setInlineEditReason("");
   };
 
+  // Adds audit metadata to a manager's own edit of an entry's hours —
+  // editedBy/editedAt/previousHours, plus an optional reason. This is the
+  // gap Phase A found: staff-initiated corrections already carry
+  // correctionNote/correctionAt, but a manager's own edit carried nothing.
+  // Purely additive — the hours themselves are saved exactly as before.
+  //
+  // Also invalidates any variance approval on this day (Phase B): an
+  // approval must never silently keep applying to numbers that have since
+  // changed. invalidateVarianceApproval is a no-op when nothing was
+  // approved for that day, which is the common case, so it's always safe
+  // to call.
   const saveInlineEdit = async (id: number) => {
     const hours = parseFloat(inlineEditHours);
     if (isNaN(hours)) return;
@@ -1552,9 +1567,18 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
     if (!matched) return;
 
     try {
-      await saveEntry({ ...matched, hours });
+      await saveEntry({
+        ...matched,
+        hours,
+        editedBy: auth.currentUser?.email || auth.currentUser?.uid || "unknown",
+        editedAt: new Date().toISOString(),
+        previousHours: matched.hours,
+        ...(inlineEditReason.trim() ? { editReason: inlineEditReason.trim() } : {}),
+      });
+      await invalidateVarianceApproval(matched.name, matched.date);
       onRefresh();
       setInlineEditId(null);
+      setInlineEditReason("");
     } catch (err) {
       console.error(err);
     }
@@ -1852,8 +1876,8 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
         <div className="flex flex-wrap items-center gap-2">
           {/* TAB SWITCHES */}
           <div className="flex bg-slate-950 border border-slate-800/80 rounded-xl p-1 text-xs">
-            {["overview", "calendar", "entries", "payroll", "schedule", "requests", "messages", "stats", "settings"]
-              .filter(tab => tab !== "schedule" || enableScheduling)
+            {["overview", "calendar", "entries", "payroll", "schedule", "variance", "requests", "messages", "stats", "settings"]
+              .filter(tab => (tab !== "schedule" && tab !== "variance") || enableScheduling)
               .map(tab => {
                 const isActive = activeTab === tab;
                 const hasAlert = (tab === "entries" && pendingEntries.length > 0)
@@ -1865,7 +1889,7 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                     className={`relative px-3 py-2 rounded-lg font-semibold transition-all ${isActive ? "bg-lime-400/10 text-lime-400 font-bold" : "text-slate-400 hover:text-slate-100"}`}
                     onClick={() => setActiveTab(tab)}
                   >
-                    {tab === "schedule" ? t("tabSchedule") : t(tab)}
+                    {tab === "schedule" ? t("tabSchedule") : tab === "variance" ? t("tabVariance") : t(tab)}
                     {hasAlert && (
                       <span className="absolute top-1 right-1 w-2 h-2 bg-amber-400 rounded-full" />
                     )}
@@ -2582,15 +2606,24 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                                   <td className="p-3 font-mono text-slate-400">{isWork ? (e.shifts && e.shifts.length > 1 ? e.shifts.map(s => s.endTime + (s.overnight ? " +1" : "")).join(" + ") : e.endTime || "—") : "—"}</td>
                                   <td className="p-3 font-mono text-lime-400 font-bold">
                                     {isEditing ? (
-                                      <div className="flex items-center gap-1.5">
+                                      <div className="flex flex-col gap-1 items-start">
+                                        <div className="flex items-center gap-1.5">
+                                          <input
+                                            className="w-14 bg-slate-950 border border-lime-400/50 rounded p-1 text-center font-mono font-bold text-xs"
+                                            type="number"
+                                            step="0.1"
+                                            value={inlineEditHours}
+                                            onChange={evt => setInlineEditHours(evt.target.value)}
+                                          />
+                                          <button className="px-2 py-1 bg-lime-400 text-slate-950 font-extrabold rounded" onClick={() => saveInlineEdit(e.id)}>OK</button>
+                                        </div>
                                         <input
-                                          className="w-14 bg-slate-950 border border-lime-400/50 rounded p-1 text-center font-mono font-bold text-xs"
-                                          type="number"
-                                          step="0.1"
-                                          value={inlineEditHours}
-                                          onChange={evt => setInlineEditHours(evt.target.value)}
+                                          className="w-32 bg-slate-950 border border-slate-700 rounded px-1.5 py-1 text-[10px] font-sans font-normal text-slate-300 placeholder:text-slate-600"
+                                          type="text"
+                                          placeholder={lang === "fr" ? "Raison (optionnel)" : "Reason (optional)"}
+                                          value={inlineEditReason}
+                                          onChange={evt => setInlineEditReason(evt.target.value)}
                                         />
-                                        <button className="px-2 py-1 bg-lime-400 text-slate-950 font-extrabold rounded" onClick={() => saveInlineEdit(e.id)}>OK</button>
                                       </div>
                                     ) : (
                                       isWork ? fmtHours(e.hours) : "—"
@@ -3071,7 +3104,7 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                         const shifts = appData.scheduledShifts || [];
                         const staffShifts = shifts.filter(s => s.name === member.name && weekDates.includes(s.date));
                         const totalScheduledHours = staffShifts.reduce((sum, s) => sum + getShiftHours(s), 0);
-                        
+
                         const otLimit = member.contract;
                         const exceedsOT = totalScheduledHours > otLimit;
                         const exceeds48h = totalScheduledHours > 48;
@@ -3175,10 +3208,10 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                             {/* Weekly Summary Column */}
                             <td className={`p-4 text-center border-l border-slate-800/40 ${printHideTotals ? "print:hidden" : ""}`}>
                               <span className={`inline-block font-mono text-xs font-bold px-2 py-1 rounded ${
-                                exceeds48h 
-                                  ? "bg-rose-500/10 text-rose-400 border border-rose-500/20 font-extrabold animate-pulse ot-badge-danger" 
-                                  : exceedsOT 
-                                    ? "bg-amber-500/10 text-amber-400 border border-amber-500/20 ot-badge-warn" 
+                                exceeds48h
+                                  ? "bg-rose-500/10 text-rose-400 border border-rose-500/20 font-extrabold animate-pulse ot-badge-danger"
+                                  : exceedsOT
+                                    ? "bg-amber-500/10 text-amber-400 border border-amber-500/20 ot-badge-warn"
                                     : "bg-slate-950 text-slate-400"
                               }`}>
                                 {totalScheduledHours.toFixed(1)}h
@@ -3696,6 +3729,10 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
             </div>
           </div>
         </div>
+      )}
+
+      {activeTab === "variance" && (
+        <VarianceTab appData={appData} lang={lang} theme={theme} onRefresh={onRefresh} />
       )}
 
       {activeTab === "stats" && (

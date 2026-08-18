@@ -199,13 +199,15 @@ export default function StaffDashboard({ appData, lang, setLang, onRefresh, them
       .reduce((sum, e) => sum + e.hours, 0);
   };
 
-  const getWeekDates = () => {
+  // weekOffset added for "My Schedule" (0 = this week, 1 = next week) —
+  // every existing call site omits it and keeps today's exact behavior.
+  const getWeekDates = (weekOffset: number = 0) => {
     const today = new Date();
     const day = today.getDay() || 7; // Monday = 1, Sunday = 7
     const monday = new Date(today);
-    monday.setDate(today.getDate() - day + 1);
+    monday.setDate(today.getDate() - day + 1 + weekOffset * 7);
     monday.setHours(0, 0, 0, 0);
-    
+
     const dates = [];
     for (let i = 0; i < 7; i++) {
       const d = new Date(monday);
@@ -312,6 +314,7 @@ export default function StaffDashboard({ appData, lang, setLang, onRefresh, them
   const [coverBusyId, setCoverBusyId] = useState<string | null>(null);
   const [coverReasonDraft, setCoverReasonDraft] = useState<Record<string, string>>({});
   const [showUpcomingShifts, setShowUpcomingShifts] = useState<boolean>(false);
+  const [myScheduleWeek, setMyScheduleWeek] = useState<"this" | "next">("this");
 
   const handleSendStaffMessage = async () => {
     if (!selectedStaff || !staffMessageDraft.trim()) return;
@@ -529,6 +532,103 @@ export default function StaffDashboard({ appData, lang, setLang, onRefresh, them
                   </p>
                 )}
               </div>
+
+              {/* MY SCHEDULE — read-only "what am I working" view, distinct
+                  from the "My Weekly Rota" grid further down (that one
+                  doubles as the day-picker for logging hours and only ever
+                  shows the current week). This is deliberately just a flat
+                  list, this week / next week, so it reads at a glance
+                  before someone even thinks about submitting a timesheet. */}
+              {config.enable_scheduling && (() => {
+                const weekDates = getWeekDates(myScheduleWeek === "next" ? 1 : 0).map(d => d.dateStr);
+                const myWeekShifts = (appData.scheduledShifts || [])
+                  .filter(s => s.name === selectedStaff && weekDates.includes(s.date))
+                  .sort((a, b) => a.date === b.date ? a.startTime.localeCompare(b.startTime) : a.date.localeCompare(b.date));
+                // Same filter shape as "myOwnSwapIds" below in MY SPACE —
+                // reused pattern, not a new query. Denied requests are
+                // excluded here (unlike that one) because a stale "cover
+                // requested" chip on a request that was already denied
+                // would be misleading in a read-only schedule view.
+                const myActiveSwapShiftIds = new Set(
+                  appData.swapRequests.filter(r => r.originalStaff === selectedStaff && r.status !== "denied").map(r => r.shiftId)
+                );
+
+                return (
+                  <div className="bg-slate-900/50 border border-slate-800/80 rounded-2xl overflow-hidden">
+                    <div className="flex items-center justify-between p-4 pb-3">
+                      <span className="text-[10px] font-bold tracking-wider text-slate-400 uppercase flex items-center gap-1.5">
+                        <Calendar size={12} className="text-lime-400" /> {lang === "fr" ? "Mon planning" : "My Schedule"}
+                      </span>
+                      <div className="flex bg-slate-950 border border-slate-800 rounded-lg p-0.5 text-[10px]">
+                        <button
+                          className={`px-2.5 py-1 rounded-md font-bold transition-all ${myScheduleWeek === "this" ? "bg-lime-400 text-slate-950" : "text-slate-400 hover:text-slate-200"}`}
+                          onClick={() => setMyScheduleWeek("this")}
+                        >
+                          {lang === "fr" ? "Cette semaine" : "This week"}
+                        </button>
+                        <button
+                          className={`px-2.5 py-1 rounded-md font-bold transition-all ${myScheduleWeek === "next" ? "bg-lime-400 text-slate-950" : "text-slate-400 hover:text-slate-200"}`}
+                          onClick={() => setMyScheduleWeek("next")}
+                        >
+                          {lang === "fr" ? "Sem. prochaine" : "Next week"}
+                        </button>
+                      </div>
+                    </div>
+
+                    {myWeekShifts.length === 0 ? (
+                      <p className="text-xs text-slate-500 italic px-4 pb-4">
+                        {lang === "fr" ? "Pas encore de service prévu." : "No shifts scheduled yet."}
+                      </p>
+                    ) : (
+                      <div className="px-4 pb-4 space-y-1.5">
+                        {myWeekShifts.map(s => {
+                          const isToday = s.date === todayStr;
+                          const isOvernight = s.endTime <= s.startTime; // same convention as plannedHours.ts's shiftDurationHours
+                          const d = new Date(s.date + "T00:00:00");
+                          const isWeekend = [0, 6].includes(d.getDay());
+                          const dayName = d.toLocaleDateString(lang === "fr" ? "fr-FR" : "en-US", { weekday: "long" });
+                          const dateLabel = d.toLocaleDateString(lang === "fr" ? "fr-FR" : "en-US", { day: "2-digit", month: "short" });
+                          const swapPending = myActiveSwapShiftIds.has(s.id);
+                          return (
+                            <div
+                              key={s.id}
+                              className={`flex items-center justify-between rounded-xl p-3 border ${
+                                isToday
+                                  ? "border-lime-400/50 bg-lime-400/5 ring-1 ring-lime-400/30"
+                                  : "border-slate-800/60 bg-slate-950/40"
+                              }`}
+                            >
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: getRoleColor(s.role, theme) }} />
+                                <div className="min-w-0">
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    <span className={`text-xs font-semibold capitalize ${isToday ? "text-lime-400" : isWeekend ? "text-sky-400" : "text-slate-200"}`}>
+                                      {isToday ? (lang === "fr" ? "Aujourd'hui" : "Today") : dayName}
+                                    </span>
+                                    <span className="text-[10px] text-slate-500 font-mono">{dateLabel}</span>
+                                    {swapPending && (
+                                      <span className="px-1.5 py-0.5 rounded-full text-[8px] font-bold bg-amber-400/10 text-amber-400 border border-amber-400/30">
+                                        {lang === "fr" ? "Couverture demandée" : "Cover requested"}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="text-[10px] text-slate-500 uppercase font-semibold mt-0.5">
+                                    {t(`role${s.role.charAt(0).toUpperCase() + s.role.slice(1)}`)}
+                                  </div>
+                                </div>
+                              </div>
+                              <span className="font-mono text-xs font-bold text-slate-300 flex-shrink-0 whitespace-nowrap">
+                                {s.startTime}–{s.endTime}
+                                {isOvernight && <span className="text-amber-400 ml-1" title={lang === "fr" ? "Se termine le lendemain" : "Ends the next day"}>+1</span>}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
 
               {/* MY SPACE: messages / time off / cover requests */}
               {(() => {

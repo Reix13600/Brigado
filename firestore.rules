@@ -189,6 +189,14 @@ service cloud.firestore {
       match /varianceApprovals/{id} {
         allow read, write: if isManagerOf(restaurantId) && !tenantBlocked(restaurantId);
       }
+
+      // Phase D (shift templates): manager-only for READ as well as
+      // write, same rationale and precedent as varianceApprovals above —
+      // staff have no legitimate reason to see or touch a manager's saved
+      // shift shortcuts.
+      match /shiftTemplates/{id} {
+        allow read, write: if isManagerOf(restaurantId) && !tenantBlocked(restaurantId);
+      }
     }
   }
 }

@@ -8,7 +8,7 @@ import { isBlockedStatus } from "./tenantStatus";
 import { varianceApprovalId } from "./variance";
 import {
   AppData, GeneralConfig, StaffMember, HourEntry, CashAdvance, ScheduledShift, ActiveClockIn, Shift,
-  Announcement, PrivateMessage, TimeOffRequest, SwapRequest, VarianceApproval,
+  Announcement, PrivateMessage, TimeOffRequest, SwapRequest, VarianceApproval, ShiftTemplate,
 } from "../types";
 
 // These are functions, not constants — RESTAURANT_ID is resolved fresh on
@@ -24,6 +24,7 @@ const messagesCol = () => collection(db, "restaurants", getRestaurantId(), "mess
 const timeOffCol = () => collection(db, "restaurants", getRestaurantId(), "timeOffRequests");
 const swapCol = () => collection(db, "restaurants", getRestaurantId(), "swapRequests");
 const varianceApprovalsCol = () => collection(db, "restaurants", getRestaurantId(), "varianceApprovals");
+const shiftTemplatesCol = () => collection(db, "restaurants", getRestaurantId(), "shiftTemplates");
 
 const DEFAULT_CONFIG: GeneralConfig = {
   resto_name: "La Vague",
@@ -117,6 +118,24 @@ async function getAllVarianceApprovals(): Promise<VarianceApproval[]> {
   }
 }
 
+/**
+ * `shiftTemplates` is manager-only to READ, same as `varianceApprovals`
+ * (see that function's own comment) — and for the exact same reason,
+ * this must swallow `permission-denied` rather than let it take down
+ * `fetchAppData`'s whole Promise.all for every non-manager session.
+ * Real bug this codebase already shipped once (see CLAUDE.md's "My
+ * Schedule" section) — not repeating it here.
+ */
+async function getAllShiftTemplates(): Promise<ShiftTemplate[]> {
+  try {
+    const snap = await getDocs(shiftTemplatesCol());
+    return snap.docs.map(d => d.data() as ShiftTemplate);
+  } catch (err: any) {
+    if (err?.code === "permission-denied") return [];
+    throw err;
+  }
+}
+
 export async function fetchAppData(): Promise<AppData> {
   const restoSnap = await getDoc(restoRef());
 
@@ -140,10 +159,10 @@ export async function fetchAppData(): Promise<AppData> {
   // this — see its own comment for why (a real bug shipped from this
   // exact check being duplicated by hand and only one copy updated).
   const blocked = isBlockedStatus(restoData.subscriptionStatus);
-  const [entries, advances, scheduledShifts, activeClockIns, announcements, messages, timeOffRequests, swapRequests, varianceApprovals] = blocked
-    ? [[], [], [], [], [], [], [], [], []] as [
+  const [entries, advances, scheduledShifts, activeClockIns, announcements, messages, timeOffRequests, swapRequests, varianceApprovals, shiftTemplates] = blocked
+    ? [[], [], [], [], [], [], [], [], [], []] as [
         HourEntry[], CashAdvance[], ScheduledShift[], ActiveClockIn[],
-        Announcement[], PrivateMessage[], TimeOffRequest[], SwapRequest[], VarianceApproval[],
+        Announcement[], PrivateMessage[], TimeOffRequest[], SwapRequest[], VarianceApproval[], ShiftTemplate[],
       ]
     : await Promise.all([
         getAllEntries(),
@@ -155,6 +174,7 @@ export async function fetchAppData(): Promise<AppData> {
         getAllTimeOffRequests(),
         getAllSwapRequests(),
         getAllVarianceApprovals(),
+        getAllShiftTemplates(),
       ]);
 
   return {
@@ -172,6 +192,7 @@ export async function fetchAppData(): Promise<AppData> {
     timeOffRequests,
     swapRequests,
     varianceApprovals,
+    shiftTemplates,
     suspended: restoData.suspended === true,
     subscriptionStatus: restoData.subscriptionStatus,
     trialExpiredAt: restoData.trialExpiredAt,
@@ -395,6 +416,23 @@ export async function saveScheduledShift(shift: ScheduledShift): Promise<Schedul
 export async function deleteScheduledShift(id: string): Promise<ScheduledShift[]> {
   await deleteDoc(doc(scheduleCol(), id));
   return getAllScheduledShifts();
+}
+
+// ── SHIFT TEMPLATES (Phase D) ────────────────────────────────────────
+// Manager-saved reusable shift shapes for the tray under the Rota
+// Planner. A template is never consumed by use — dragging it only reads
+// its label/startTime/endTime/role to stamp a new ScheduledShift via
+// saveScheduledShift() above, the same function a manually-added shift
+// uses. See ShiftTemplate's own doc comment in types.ts.
+
+export async function saveShiftTemplate(template: ShiftTemplate): Promise<ShiftTemplate[]> {
+  await setDoc(doc(shiftTemplatesCol(), template.id), template);
+  return getAllShiftTemplates();
+}
+
+export async function deleteShiftTemplate(id: string): Promise<ShiftTemplate[]> {
+  await deleteDoc(doc(shiftTemplatesCol(), id));
+  return getAllShiftTemplates();
 }
 
 // ── ANNOUNCEMENTS (manager -> everyone, read-only for staff) ──────────

@@ -3,8 +3,8 @@ import {
   signInManagerWithEmail, signInManagerWithGoogle, signOutManager,
   isAuthorizedManager, watchAuthState,
 } from "../utils/auth";
-import { 
-  AppData, HourEntry, StaffMember, CashAdvance, GeneralConfig, EntryType, RoleType, ScheduledShift, Deduction, Shift
+import {
+  AppData, HourEntry, StaffMember, CashAdvance, GeneralConfig, EntryType, RoleType, ScheduledShift, Deduction, Shift, ShiftTemplate
 } from "../types";
 import { getTranslation, LangType, TRANSLATIONS } from "../utils/translations";
 import { auth, getRestaurantId, functions } from "../firebase";
@@ -30,7 +30,8 @@ import {
   saveScheduledShift, deleteScheduledShift,
   postAnnouncement, deleteAnnouncement, sendMessage, decideTimeOffRequest, decideSwap,
   saveTimeOffNote, saveSwapNote, deleteStaffMemberData,
-  invalidateVarianceApproval
+  invalidateVarianceApproval,
+  saveShiftTemplate, deleteShiftTemplate
 } from "../utils/api";
 import { 
   Users, Calendar, DollarSign, BarChart3, Settings, Clipboard,
@@ -263,6 +264,15 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
   const [scheduleModalOpen, setScheduleModalOpen] = useState<boolean>(false);
   const [printHideAlerts, setPrintHideAlerts] = useState<boolean>(true);
   const [printHideTotals, setPrintHideTotals] = useState<boolean>(false);
+
+  // Phase D: shift-template tray
+  const [templateFormOpen, setTemplateFormOpen] = useState<boolean>(false);
+  const [templateLabel, setTemplateLabel] = useState<string>("");
+  const [templateStart, setTemplateStart] = useState<string>("09:00");
+  const [templateEnd, setTemplateEnd] = useState<string>("15:30");
+  const [templateRole, setTemplateRole] = useState<RoleType | "">("");
+  const [templateSaving, setTemplateSaving] = useState<boolean>(false);
+  const [templateDeletingId, setTemplateDeletingId] = useState<string | null>(null);
   const [scheduleForm, setScheduleForm] = useState<{
     name: string;
     date: string;
@@ -1540,26 +1550,111 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
     e.dataTransfer.setData("text/plain", shiftId);
   };
 
+  // Phase D: dragging a template uses a SEPARATE dataTransfer MIME type
+  // rather than reusing "text/plain" — this is what lets handleDropShift
+  // below tell "move this existing shift" apart from "create a new one
+  // from this template" using the SAME onDragOver/onDrop targets already
+  // wired into the weekly grid, instead of a second drag-and-drop system.
+  const TEMPLATE_DRAG_TYPE = "application/x-shift-template";
+  const handleTemplateDragStart = (e: React.DragEvent, templateId: string) => {
+    e.dataTransfer.setData(TEMPLATE_DRAG_TYPE, templateId);
+  };
+
   const handleDropShift = async (e: React.DragEvent, targetDate: string, targetName: string) => {
     e.preventDefault();
+    const targetMember = appData.staff.find(s => s.name === targetName);
+
+    // A template was dropped: create a brand-new, independent shift from
+    // its label/start/end/role. Goes through saveScheduledShift() below —
+    // the exact same call a manually-added shift uses (handleSaveSchedule
+    // Shift also calls it) — so Phase C's weekly counter, conflict
+    // detection, etc. all see it identically to any other shift. The
+    // template itself is untouched: nothing here reads or writes
+    // shiftTemplates, so it stays in the tray for the next drag.
+    if (e.dataTransfer.types.includes(TEMPLATE_DRAG_TYPE)) {
+      const templateId = e.dataTransfer.getData(TEMPLATE_DRAG_TYPE);
+      const template = (appData.shiftTemplates || []).find(t => t.id === templateId);
+      if (!template) return;
+
+      const role = template.role || (targetMember ? targetMember.role : "server");
+      const hours = getShiftHours({
+        id: "", name: targetName, date: targetDate,
+        startTime: template.startTime, endTime: template.endTime, hours: 0, role,
+      });
+      const newShift: ScheduledShift = {
+        id: `shift-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+        name: targetName,
+        date: targetDate,
+        startTime: template.startTime,
+        endTime: template.endTime,
+        hours,
+        role,
+      };
+
+      try {
+        await saveScheduledShift(newShift);
+        onRefresh();
+      } catch (err) {
+        console.error(err);
+      }
+      return;
+    }
+
     const shiftId = e.dataTransfer.getData("text/plain");
     const allShifts = appData.scheduledShifts || [];
     const matchedShift = allShifts.find(s => s.id === shiftId);
     if (!matchedShift) return;
-    
-    const targetMember = appData.staff.find(s => s.name === targetName);
+
     const updatedShift: ScheduledShift = {
       ...matchedShift,
       date: targetDate,
       name: targetName,
       role: targetMember ? targetMember.role : matchedShift.role
     };
-    
+
     try {
       await saveScheduledShift(updatedShift);
       onRefresh();
     } catch (err) {
       console.error(err);
+    }
+  };
+
+  // Phase D: manage the shift-template tray. Manager-driven only — label
+  // + start + end (+ optional role) typed in by hand, no auto-suggestions.
+  const handleAddTemplate = async () => {
+    if (!templateLabel.trim() || !templateStart || !templateEnd) return;
+    const template: ShiftTemplate = {
+      id: `template-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+      label: templateLabel.trim(),
+      startTime: templateStart,
+      endTime: templateEnd,
+      ...(templateRole ? { role: templateRole } : {}),
+      createdAt: new Date().toISOString(),
+    };
+    setTemplateSaving(true);
+    try {
+      await saveShiftTemplate(template);
+      onRefresh();
+      setTemplateLabel("");
+      setTemplateRole("");
+      setTemplateFormOpen(false);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setTemplateSaving(false);
+    }
+  };
+
+  const handleDeleteTemplate = async (id: string) => {
+    setTemplateDeletingId(id);
+    try {
+      await deleteShiftTemplate(id);
+      onRefresh();
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setTemplateDeletingId(null);
     }
   };
 
@@ -3500,6 +3595,131 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
               </div>
             </div>
           )}
+
+          {/* ── PHASE D: SHIFT-TEMPLATE TRAY ─────────────────────────
+              Persistent shelf under the grid, not a modal — templates
+              stay visible and re-draggable across the whole session.
+              Dragging only lands on drop targets, which only exist in
+              the weekly grid above (same limitation the existing
+              move-a-shift drag already has). */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-lg print:hidden">
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider">
+                  {lang === "fr" ? "Modèles de service" : "Shift Templates"}
+                </h3>
+                <p className="text-[10px] text-slate-500 mt-0.5">
+                  {lang === "fr"
+                    ? "Glissez un modèle sur une case du planning hebdomadaire pour créer un service instantanément."
+                    : "Drag a template onto a cell in the weekly grid to instantly create a shift."}
+                </p>
+              </div>
+              <button
+                className="px-3 py-1.5 bg-lime-400 hover:bg-lime-300 text-slate-950 rounded-xl text-xs font-extrabold flex items-center gap-1.5 transition-all flex-shrink-0"
+                onClick={() => setTemplateFormOpen(v => !v)}
+              >
+                ➕ {lang === "fr" ? "Modèle" : "Template"}
+              </button>
+            </div>
+
+            {templateFormOpen && (
+              <div className="bg-slate-950/50 border border-slate-800 rounded-xl p-3 mb-3 flex flex-wrap items-end gap-2">
+                <div className="flex-1 min-w-[140px]">
+                  <label className="block text-[9px] font-bold text-slate-500 uppercase mb-1">
+                    {lang === "fr" ? "Libellé" : "Label"}
+                  </label>
+                  <input
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2 py-1.5 text-xs text-slate-200"
+                    placeholder={lang === "fr" ? "Ex. Serveur – Déjeuner" : "E.g. Server – Lunch"}
+                    value={templateLabel}
+                    onChange={e => setTemplateLabel(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="block text-[9px] font-bold text-slate-500 uppercase mb-1">{t("start")}</label>
+                  <input
+                    type="time"
+                    className="bg-slate-900 border border-slate-800 rounded-lg px-2 py-1.5 text-xs text-slate-200"
+                    value={templateStart}
+                    onChange={e => setTemplateStart(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="block text-[9px] font-bold text-slate-500 uppercase mb-1">{t("finish")}</label>
+                  <input
+                    type="time"
+                    className="bg-slate-900 border border-slate-800 rounded-lg px-2 py-1.5 text-xs text-slate-200"
+                    value={templateEnd}
+                    onChange={e => setTemplateEnd(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="block text-[9px] font-bold text-slate-500 uppercase mb-1">{t("role")}</label>
+                  <select
+                    className="bg-slate-900 border border-slate-800 rounded-lg px-2 py-1.5 text-xs text-slate-200"
+                    value={templateRole}
+                    onChange={e => setTemplateRole(e.target.value as RoleType | "")}
+                  >
+                    <option value="">{lang === "fr" ? "Selon la personne" : "Whoever it's for"}</option>
+                    {(Object.keys(ROLES) as RoleType[]).map(r => (
+                      <option key={r} value={r}>{ROLES[r]}</option>
+                    ))}
+                  </select>
+                </div>
+                <button
+                  className="px-3 py-1.5 bg-lime-400 hover:bg-lime-300 text-slate-950 rounded-lg text-xs font-bold disabled:opacity-50"
+                  onClick={handleAddTemplate}
+                  disabled={templateSaving || !templateLabel.trim()}
+                >
+                  {templateSaving ? "..." : (lang === "fr" ? "Enregistrer" : "Save")}
+                </button>
+                <button
+                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-semibold"
+                  onClick={() => setTemplateFormOpen(false)}
+                >
+                  {lang === "fr" ? "Annuler" : "Cancel"}
+                </button>
+              </div>
+            )}
+
+            {(appData.shiftTemplates || []).length === 0 ? (
+              <p className="text-xs text-slate-500 italic">
+                {lang === "fr" ? "Pas encore de modèle enregistré." : "No templates saved yet."}
+              </p>
+            ) : (
+              <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-thin">
+                {(appData.shiftTemplates || []).map(tpl => {
+                  const col = tpl.role ? getRoleColor(tpl.role, theme) : "#94a3b8";
+                  return (
+                    <div
+                      key={tpl.id}
+                      draggable
+                      onDragStart={e => handleTemplateDragStart(e, tpl.id)}
+                      className="flex-shrink-0 w-40 p-2.5 rounded-xl border cursor-grab active:cursor-grabbing select-none group/tpl relative"
+                      style={{ backgroundColor: `${col}15`, borderColor: `${col}40` }}
+                      title={lang === "fr" ? "Glisser sur le planning" : "Drag onto the schedule"}
+                    >
+                      <button
+                        onClick={() => handleDeleteTemplate(tpl.id)}
+                        disabled={templateDeletingId === tpl.id}
+                        className="absolute top-1 right-1 opacity-0 group-hover/tpl:opacity-100 text-slate-500 hover:text-rose-400 transition-all p-0.5"
+                        title={lang === "fr" ? "Supprimer" : "Delete"}
+                      >
+                        <X size={12} />
+                      </button>
+                      <div className="text-[11px] font-bold text-slate-200 truncate pr-4">{tpl.label}</div>
+                      <div className="text-[10px] font-mono text-slate-400 mt-0.5">{tpl.startTime}–{tpl.endTime}</div>
+                      {tpl.role && (
+                        <div className="text-[8px] uppercase font-semibold tracking-wide mt-1" style={{ color: col }}>
+                          {t(`role${tpl.role.charAt(0).toUpperCase() + tpl.role.slice(1)}`)}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
       )}
 

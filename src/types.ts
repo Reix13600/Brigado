@@ -140,6 +140,25 @@ export interface VarianceApproval {
   note?: string;
 }
 
+// Phase D: a manager-saved, reusable shift shape (e.g. "Server – Lunch,
+// 11:30–15:00") shown in a tray under the Rota Planner and dragged onto
+// the grid to instantly create a shift. The template itself is never
+// consumed by a drag — only ever read to stamp a brand-new
+// ScheduledShift, which is created through the exact same
+// saveScheduledShift() call a manually-added shift uses.
+export interface ShiftTemplate {
+  id: string;
+  label: string;
+  startTime: string; // HH:MM
+  endTime: string; // HH:MM
+  // Optional: a template isn't tied to a specific person, so a role isn't
+  // required the way it is on a ScheduledShift (which inherits from
+  // whoever it's assigned to). When set, it pre-fills the created shift's
+  // role instead of falling back to the target staff member's own role.
+  role?: RoleType;
+  createdAt: string; // ISO string
+}
+
 // A staff member who has clocked in but not yet clocked out.
 export interface ActiveClockIn {
   name: string;
@@ -218,6 +237,7 @@ export interface AppData {
   messages: PrivateMessage[];
   timeOffRequests: TimeOffRequest[];
   varianceApprovals: VarianceApproval[];
+  shiftTemplates: ShiftTemplate[];
   swapRequests: SwapRequest[];
   // Set true by the Stripe webhook when a subscription is cancelled.
   // Soft-suspend, not deletion — data stays intact.

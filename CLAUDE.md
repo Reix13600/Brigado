@@ -175,6 +175,27 @@ This was caught by testing against real data, not by review — worth rememberin
 * **Own shifts only.** No manager-side "who's working when" cross-staff view was requested or built here — out of scope.
 * **No push notifications.** The view is pull-only (open the app, check). A staff member isn't notified when a new shift is scheduled for them. Reasonable v1 boundary, not a bug — flagged here as a plausible future phase, same as the no-show-alerts / overtime-warning items already noted in the scheduling series above.
 
+## Dark-mode muted-text contrast fix (2026-08-19)
+
+`text-slate-500`/`text-slate-600`/`text-slate-700` — used ~250 times across the app and marketing site (timestamps, captions, hints, empty states, secondary labels, table borders, FAQ copy) — failed WCAG AA against every dark background this app actually uses. Not eyeballed; computed via the standard relative-luminance formula:
+
+| | `bg-slate-950` | `bg-slate-900` | `bg-slate-800` |
+|---|---|---|---|
+| `text-slate-400` (untouched) | 7.87:1 ✅ | 6.96:1 ✅ | 5.71:1 ✅ |
+| `text-slate-500` (was) | 4.24:1 ❌ | 3.75:1 ❌ | 3.07:1 ❌ |
+| `text-slate-600` (was) | 2.66:1 ❌ | 2.36:1 ❌ | 1.93:1 ❌ |
+| `text-slate-700` (was) | 1.95:1 ❌ | 1.72:1 ❌ | 1.41:1 ❌ |
+
+AA requires 4.5:1 for normal text (3:1 for large/bold ≥18pt or ≥14pt-bold). `text-slate-400` already passed everywhere and was left alone — it's the "secondary" tier. The light theme (`.theme-light`, see below) was **already** fixed in an earlier pass and was independently re-verified as passing (6.9–17.9:1 across its own backgrounds) — not touched by this fix.
+
+**Fix — one shared token, not scattered inline overrides.** `text-slate-500/600/700` are consolidated to a single corrected "muted" tone, `#829ab1` (Tailwind's old cool-gray-400), via a global CSS override in `src/index.css` (plain rules + `!important`, same proven technique the existing `.theme-light` block already uses to reliably beat Tailwind v4's layered utility output — not a new pattern). Three *separate* replacement shades were considered and rejected: there isn't enough contrast headroom between the AA floor and `text-slate-400` on the app's brightest background (`bg-slate-800`, 5.71:1) to fit three visually distinct AA-passing steps below it. Three different *failing* shades were never a real hierarchy to begin with, so collapsing them to one loses nothing. `#829ab1` clears AA with real margin everywhere it's used (**5.02:1 minimum**, on `bg-slate-800`) while staying consistently ~0.7–1:1 dimmer than `text-slate-400` on every background, preserving the secondary/muted visual step. Placeholder variants (`placeholder-slate-600`, `placeholder-slate-700`, `placeholder:text-slate-600`) got the identical fix.
+
+**Deliberate exception — the two print portals stay on the original values.** `#timesheet-print-area` and `#qr-poster-print-area` (Timesheet.tsx / BookkeeperExport.tsx / QRPoster.tsx) render their printable area on a **white** background via `createPortal` straight to `document.body`, entirely outside the app's dark theme. The *original* `text-slate-500`/`text-slate-600` values already passed AA there (4.76:1 / 7.58:1 on white) — applying the new brighter dark-mode value would have made them *worse* (2.91:1, a new failure). Two ID-scoped rules in `index.css` restore the original hex values specifically inside those two containers, overriding the global fix by specificity. Don't remove these thinking they're dead code — they're the reason print output didn't regress.
+
+**Disabled-state `disabled:opacity-XX` dimming was deliberately left alone.** It's a WCAG-exempt pattern (1.4.3 excludes inactive UI components) used consistently for buttons across the app — the point of a disabled control is to visually read as unavailable. Any *text* inside a disabled element still gets the token fix above; only the intentional opacity dimming on top is untouched.
+
+**Verified**: typecheck + build clean (root; this phase touches no Cloud Functions code). Computed-style checks (not eyeballed) against the running dev server confirmed `getComputedStyle(el).color === "rgb(130, 154, 177)"` (`#829ab1`) on real elements across three surfaces: the marketing Landing page (23 elements), the real StaffDashboard "My Schedule" empty state and Rota grid (20 elements), and the manager login screen. Zero console errors (aside from an unrelated Vite HMR WebSocket reconnect issue in this sandboxed dev environment, not an app error). **Not verified**: pixel screenshots — the Browser pane failed to composite frames in this session (a client-display-state issue, confirmed unrelated to the code change by every other check above) — before/after screenshots are still owed once that's available.
+
 ## Landing page — "How it works" explainer video (2026-08-12)
 
 * The static chalkboard illustration (`src/assets/how-it-works.webp`) under the hero was replaced by a 10s animated explainer. `src/components/HowItWorksVideo.tsx` owns the whole behaviour; `Landing.tsx` just renders `<HowItWorksVideo />` in the FR branch.

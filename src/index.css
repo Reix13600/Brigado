@@ -67,6 +67,62 @@
   }
 }
 
+/* ── Dark-mode muted/secondary text contrast fix (2026-08-19) ─────────
+ * text-slate-500/600/700 (and their placeholder variants) failed WCAG
+ * AA against every dark background this app actually uses — measured,
+ * not eyeballed:
+ *   bg-slate-950: slate-500 4.24:1, slate-600 2.66:1, slate-700 1.95:1
+ *   bg-slate-900: slate-500 3.75:1, slate-600 2.36:1, slate-700 1.72:1
+ *   bg-slate-800: slate-500 3.07:1, slate-600 1.93:1, slate-700 1.41:1
+ * (AA requires 4.5:1 for normal text.) text-slate-400 was NOT touched —
+ * it already passes everywhere (5.71:1 minimum) and remains the
+ * "secondary" tier below primary text.
+ *
+ * 500/600/700 are consolidated to ONE corrected "muted" tone (#829ab1,
+ * Tailwind's old cool-gray-400) rather than three separate replacement
+ * shades: there isn't enough contrast headroom between the AA floor and
+ * text-slate-400 on this app's brightest background (bg-slate-800,
+ * 5.71:1) to fit three visually distinct AA-passing steps below it —
+ * three different FAILING shades were never a real hierarchy to begin
+ * with, so collapsing them loses nothing real. #829ab1 clears AA with
+ * real margin everywhere (5.02:1 minimum, vs. the 4.5:1 floor) while
+ * staying consistently ~0.7–1:1 dimmer than text-slate-400 on every
+ * background, preserving the secondary/muted step.
+ *
+ * Deliberately does NOT touch .theme-light's own remap of these same
+ * classes further down this file (already high-contrast, verified
+ * separately) or the print portals below (already correct on white).
+ */
+.text-slate-500,
+.text-slate-600,
+.text-slate-700 {
+  color: #829ab1 !important;
+}
+
+.placeholder-slate-600::placeholder,
+.placeholder-slate-700::placeholder,
+.placeholder\:text-slate-600::placeholder {
+  color: #829ab1 !important;
+}
+
+/* Print portals (Timesheet, QR poster) render their printable area on a
+ * WHITE background (#timesheet-print-area, #qr-poster-print-area) via
+ * createPortal straight to document.body — outside the app's dark theme
+ * entirely. The ORIGINAL slate-500/600 values already pass AA there
+ * (4.76:1 / 7.58:1 on white); brightening them via the rule above would
+ * make them WORSE, not better, so they're restored here. ID selectors
+ * win over both the class-only rule above and .theme-light's own
+ * (irrelevant anyway — these portals render outside the .theme-light
+ * subtree, but kept explicit rather than relying on that). */
+#timesheet-print-area .text-slate-500,
+#qr-poster-print-area .text-slate-500 {
+  color: #64748b !important;
+}
+#timesheet-print-area .text-slate-600,
+#qr-poster-print-area .text-slate-600 {
+  color: #475569 !important;
+}
+
 /* High-Contrast Light Mode overrides for bright restaurant environments */
 .theme-light, 
 .theme-light body, 

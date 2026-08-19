@@ -175,6 +175,47 @@ This was caught by testing against real data, not by review — worth rememberin
 * **Own shifts only.** No manager-side "who's working when" cross-staff view was requested or built here — out of scope.
 * **No push notifications.** The view is pull-only (open the app, check). A staff member isn't notified when a new shift is scheduled for them. Reasonable v1 boundary, not a bug — flagged here as a plausible future phase, same as the no-show-alerts / overtime-warning items already noted in the scheduling series above.
 
+## Scheduling/payroll series — PHASE D: shift-template tray (2026-08-19)
+
+Fourth phase of the series (after Phase A's `effectiveHours.ts`, Phase B's variance view, Phase C's `plannedHours.ts` weekly counter — the latter built but, as of this phase, still undocumented here beyond its own code comments). A persistent tray under the Rota Planner's weekly grid where a manager saves reusable shift shapes (label + start + end + optional role) and drags one onto a grid cell to instantly create a shift for whoever it's dropped on.
+
+### Step 0 findings
+
+* **Drag-and-drop mechanism: native HTML5 D&D, reused exactly, not duplicated.** The grid's existing "move a shift" interaction (`handleDragStart`/`handleDropShift` in `ManagerDashboard.tsx`) is plain `draggable` + `e.dataTransfer` — no library. Templates use the SAME `onDragOver`/`onDrop` targets already wired into the weekly grid's cells; the only addition is a second `dataTransfer` MIME type (`application/x-shift-template`, vs. the existing move-drag's bare `"text/plain"`) so `handleDropShift` can tell "move this existing shift" apart from "create a new one from this template" without a parallel drag system. Drop targets only exist in the **weekly** view (the monthly calendar grid has none) — same pre-existing limitation the move-a-shift drag already had; not new.
+* **Role is a real, existing concept**: `RoleType`, `StaffMember.role`, `ScheduledShift.role`. A template's `role` is optional — when unset, a dropped template inherits the target staff member's own role (mirroring how the existing move-drag already resolves role on reassignment), rather than forcing every template to hardcode one.
+* **Subcollection + rules convention**: followed `varianceApprovals` exactly (Phase B) — `shiftTemplates`, manager-only for both read and write, since staff have no legitimate reason to see or touch a manager's saved shortcuts.
+
+### Data model — `shiftTemplates/{id}`
+
+`ShiftTemplate` (`types.ts`): `{ id, label, startTime, endTime, role?, createdAt }`. Manager-driven only — added via a simple label+start+end(+role) form in the tray, no frequency-based auto-suggestion in this phase. Expected to hold a handful of rows per restaurant, not hundreds; no pagination or search was built.
+
+```
+match /shiftTemplates/{id} {
+  allow read, write: if isManagerOf(restaurantId) && !tenantBlocked(restaurantId);
+}
+```
+
+Verified against the Firestore emulator (`scripts/test-shift-templates-rules.mjs`, same pattern as `scripts/test-variance-rules.mjs`): 12/12 — manager read/write/delete allowed, anonymous-staff and unauthenticated denied, cross-tenant manager denied, blocked-tenant manager denied.
+
+**`fetchAppData`'s new `getAllShiftTemplates()` reuses the exact `permission-denied` → `[]` guard** already fixed for `getAllVarianceApprovals()` in the "My Schedule" section above — a manager-only-read subcollection added to `fetchAppData`'s `Promise.all` is only safe when every session type that calls `fetchAppData` can survive a denial on it, and that fix is now the established pattern for the *next* subcollection like this too, not just a one-off patch. Confirmed locally against the real backend (dev server, anonymous session): zero console errors, app loads normally.
+
+### A template is never consumed — and a drop is a real ScheduledShift, created the same way any other one is
+
+Dragging a template does **not** delete or modify the template doc. It reads `label`/`startTime`/`endTime`/`role` and calls `saveScheduledShift()` — the exact same `api.ts` function `handleSaveScheduleShift` (the manual "Add Shift" modal) and the existing move-a-shift drag both already call — with a freshly generated id (`shift-{timestamp}-{random}`, same scheme as manual creation) and `hours` computed via the same local `getShiftHours()` the rest of `ManagerDashboard.tsx` uses. The resulting `ScheduledShift` doc is indistinguishable in shape from a manually-typed one. This is why Phase C's `computePlannedWeekTotal` (the running counter) needed zero changes to pick up template-created shifts: it filters `appData.scheduledShifts` by `name`/`date` only, with no notion of "how a shift was created."
+
+### Verified
+
+* Emulator rules: 12/12 (above).
+* Data-level, against **real production `la-vague`** documents (not a mock): created one disposable template, then created two disposable `ScheduledShift` docs in the exact shape `handleDropShift`'s template branch produces — one for Reigo, one for Anthony, different dates — and confirmed both are correct and independent, and the template doc is unchanged (unconsumed) throughout. Then ran the real `computePlannedWeekTotal()` from `plannedHours.ts` against that real data: both employees' counters came back correct (`3.5/30h` under threshold for Reigo, `3.5/35h` for Anthony) with zero special-casing needed — direct proof of the shared-code-path claim above. All three disposable docs deleted afterward.
+* Typecheck + build: clean, both root and `functions/` (this phase touches no Cloud Functions code).
+* **Not verified**: the actual drag gesture and the tray's visual rendering in the browser — the Schedule tab sits behind real manager email/password or Google auth, which wasn't available in this session (same constraint noted when "My Schedule" was verified). The React drag handlers themselves typecheck and are small/deterministic; the Firestore-level behavior they produce is what was verified directly above.
+
+### Deliberately out of scope this phase
+
+* No frequency-based "popular shifts" auto-suggestion — manager-driven only, per the original spec.
+* No template editing (label/time/role) — delete and re-add is the only path for now.
+* Monthly-view drag support was never in scope; templates share the weekly-only limitation the move-a-shift drag already had.
+
 ## Dark-mode muted-text contrast fix (2026-08-19)
 
 `text-slate-500`/`text-slate-600`/`text-slate-700` — used ~250 times across the app and marketing site (timestamps, captions, hints, empty states, secondary labels, table borders, FAQ copy) — failed WCAG AA against every dark background this app actually uses. Not eyeballed; computed via the standard relative-luminance formula:

@@ -1,0 +1,52 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // Restaurant logos, uploaded by managers via Settings, reviewed by
+    // a platform admin before ever appearing publicly (see
+    // adminSetLogoApproval in functions/ and ApprovedLogo in types.ts).
+    //
+    // Keyed by the UPLOADER'S OWN UID, not the restaurant slug — a
+    // Storage-Rules-to-Firestore cross-service firestore.get() check
+    // (to verify "is this uid a manager of restaurantId") turned out to
+    // be unreliable in the local Firestore+Storage emulator combo
+    // (verified: identical rule logic that works standalone returns a
+    // null-value evaluation error once both emulators run together —
+    // see scripts/test-logo-rules.mjs). Keying by uid instead needs no
+    // cross-service call at all: request.auth.uid == uid is all Storage
+    // Rules needs to check here. The actual "does this uploaded file
+    // belong to restaurant X" association still goes through the
+    // ALREADY-proven Firestore isManagerOf() rule — uploadRestaurantLogo()
+    // (api.ts) writes the resulting download URL onto
+    // restaurants/{slug}.logoUrl, a plain single-service Firestore write
+    // gated by the same rule every other manager-only field update
+    // already relies on. Equally secure, none of the fragile part.
+    //
+    // Read is public (no auth check) — this mirrors how a Storage
+    // download URL normally works (an unguessable token in the URL, not
+    // a rules check, is what actually protects an unlisted file). What
+    // gates actual PUBLIC DISPLAY is whether a URL is ever exposed
+    // anywhere a stranger would find it: the marketing carousel only
+    // reads the separate approvedLogos Firestore collection, which
+    // nothing writes to except the admin approval callable. An
+    // uploaded-but-pending logo's URL exists but is never linked from
+    // anywhere public.
+    match /logos/{uid}/{fileName} {
+      allow read: if true;
+      allow write: if request.auth != null
+        && request.auth.uid == uid
+        // Keep this to actual images, and a sane size cap (5MB) — a
+        // logo has no business being larger than that, and this is the
+        // one and only public-facing upload path in the whole app.
+        && request.resource.size < 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+    }
+
+    // Default-deny everything else — no other Storage path exists in
+    // this app yet; keep it that way explicitly rather than by omission.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

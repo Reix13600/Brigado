@@ -8,6 +8,7 @@ import LoginModal from "./LoginModal";
 import screenshotOverview from "../assets/screenshots/screenshot-overview.webp";
 import screenshotStaff from "../assets/screenshots/screenshot-staff.webp";
 import HowItWorksVideo from "./HowItWorksVideo";
+import TrustedByCarousel from "./TrustedByCarousel";
 
 export default function Landing() {
   const [lang, setLang] = useState<LandingLang>("fr");
@@ -145,6 +146,8 @@ export default function Landing() {
           </div>
         ))}
       </div>
+
+      <TrustedByCarousel lang={lang} />
 
       {/* SCREENSHOTS */}
       <div className="max-w-5xl mx-auto px-6 pb-24 space-y-20">

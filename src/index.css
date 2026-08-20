@@ -65,6 +65,21 @@
   .animate-shake {
     animation: shake 0.35s ease-in-out;
   }
+
+  /* "Trusted by" logo carousel (Landing page) — the track is rendered
+     3x back-to-back (see TrustedByCarousel.tsx), so scrolling exactly
+     one third of its width loops seamlessly regardless of how few
+     logos exist. Pauses on hover so a visitor can actually look. */
+  @keyframes trustedByScroll {
+    from { transform: translateX(0); }
+    to { transform: translateX(-33.333%); }
+  }
+  .animate-trusted-by-scroll {
+    animation: trustedByScroll 22s linear infinite;
+  }
+  .animate-trusted-by-scroll:hover {
+    animation-play-state: paused;
+  }
 }
 
 /* ── Dark-mode muted/secondary text contrast fix (2026-08-19) ─────────

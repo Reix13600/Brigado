@@ -10,7 +10,7 @@ import {
 import {
   Building2, Ticket, ShieldCheck, Search, PauseCircle, PlayCircle,
   Trash2, StickyNote, Plus, RefreshCw, LogOut, AlertTriangle, X,
-  LayoutDashboard,
+  LayoutDashboard, Check, ImageIcon,
 } from "lucide-react";
 
 // Platform-level Site Manager dashboard at /admin. NOT part of the
@@ -62,6 +62,9 @@ interface Business {
   adminNotes: string;
   hasStripe: boolean;
   deletionReason: string | null;
+  logoUrl: string | null;
+  logoConsentGiven: boolean;
+  logoApprovalStatus: "pending" | "approved" | "rejected" | null;
 }
 
 interface BonusCode {
@@ -734,6 +737,42 @@ function BusinessesTab({ rows, err, onRefresh, incomingFilter, onFilterConsumed 
                 </div>
                 {b.pauseReason && <div className="text-[11px] text-amber-300/80 mt-1">Pause note: {b.pauseReason}</div>}
                 {b.adminNotes && <div className="text-[11px] text-slate-400 mt-1 italic">{b.adminNotes}</div>}
+                {b.logoApprovalStatus === "pending" && (
+                  <div className="flex items-center gap-2 mt-2 p-2 rounded-xl border border-amber-500/30 bg-amber-500/5">
+                    {b.logoUrl && (
+                      <img src={b.logoUrl} alt="" className="w-8 h-8 rounded object-contain bg-white flex-shrink-0" />
+                    )}
+                    <span className="text-[11px] text-amber-300 flex-1 flex items-center gap-1">
+                      <ImageIcon size={12} /> Logo pending review — consent {b.logoConsentGiven ? "given" : "MISSING"}
+                    </span>
+                    <button
+                      disabled={!b.logoConsentGiven}
+                      onClick={async () => { await call("adminSetLogoApproval")({ slug: b.slug, status: "approved" }); void onRefresh(); }}
+                      title="Approve logo" aria-label="Approve logo"
+                      className="p-1.5 rounded-lg border border-lime-500/40 text-lime-400 hover:bg-lime-400/10 disabled:opacity-30"
+                    >
+                      <Check size={13} strokeWidth={2} />
+                    </button>
+                    <button
+                      onClick={async () => { await call("adminSetLogoApproval")({ slug: b.slug, status: "rejected" }); void onRefresh(); }}
+                      title="Reject logo" aria-label="Reject logo"
+                      className="p-1.5 rounded-lg border border-rose-500/40 text-rose-400 hover:bg-rose-400/10"
+                    >
+                      <X size={13} strokeWidth={2} />
+                    </button>
+                  </div>
+                )}
+                {b.logoApprovalStatus === "approved" && (
+                  <div className="flex items-center gap-2 mt-1 text-[11px] text-lime-400">
+                    <ImageIcon size={12} /> Logo live on the marketing site
+                    <button
+                      onClick={async () => { await call("adminSetLogoApproval")({ slug: b.slug, status: "rejected" }); void onRefresh(); }}
+                      className="text-slate-500 hover:text-rose-400 underline underline-offset-2"
+                    >
+                      remove
+                    </button>
+                  </div>
+                )}
               </div>
 
               <div className="flex items-center gap-1">

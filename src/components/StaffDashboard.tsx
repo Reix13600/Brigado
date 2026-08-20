@@ -3,7 +3,7 @@ import { AppData, HourEntry, Shift, EntryType, CashAdvance } from "../types";
 import { getFrenchHoliday } from "../utils/holidays";
 import { getRoleColor } from "../utils/roleColors";
 import { getTranslation, LangType } from "../utils/translations";
-import { saveEntry, saveDayNote, deleteEntry, clockIn, clockOut, cancelClockIn, sendMessage, requestTimeOff, requestSwap, claimSwap, cancelSwapClaim } from "../utils/api";
+import { saveEntry, saveDayNote, deleteEntry, clockIn, clockOut, cancelClockIn, sendMessage, requestTimeOff, requestSwap, claimSwap, cancelSwapClaim, markThreadRead } from "../utils/api";
 import { 
   User, Calendar, Clock, CheckCircle2, AlertTriangle, ShieldAlert,
   ArrowRight, Check, X, Clipboard, ArrowLeft, RefreshCw, Eye, EyeOff, LogIn, LogOut
@@ -633,8 +633,10 @@ export default function StaffDashboard({ appData, lang, setLang, onRefresh, them
               {/* MY SPACE: messages / time off / cover requests */}
               {(() => {
                 const myMessages = appData.messages.filter(m => m.staffName === selectedStaff);
-                const lastMsg = [...myMessages].sort((a, b) => b.sentAt.localeCompare(a.sentAt))[0];
-                const hasUnread = lastMsg?.from === "manager";
+                // Real read state (readAt), not "who sent the last message" —
+                // that heuristic never cleared for a message the staff member
+                // read but didn't reply to. See markThreadRead in api.ts.
+                const hasUnread = myMessages.some(m => m.from === "manager" && !m.readAt);
                 const myUpcomingShifts = (appData.scheduledShifts || [])
                   .filter(s => s.name === selectedStaff && s.date >= todayStr)
                   .sort((a, b) => a.date.localeCompare(b.date));
@@ -659,7 +661,13 @@ export default function StaffDashboard({ appData, lang, setLang, onRefresh, them
                         <button
                           key={key}
                           className={`relative py-3 text-xs font-semibold transition-all ${spaceView === key ? "bg-lime-400/10 text-lime-400" : "text-slate-400 hover:text-slate-200"}`}
-                          onClick={() => setSpaceView(spaceView === key ? null : key)}
+                          onClick={() => {
+                            const opening = spaceView !== key;
+                            setSpaceView(spaceView === key ? null : key);
+                            if (opening && key === "messages" && hasUnread && selectedStaff) {
+                              markThreadRead(selectedStaff, "staff").then(onRefresh).catch(console.error);
+                            }
+                          }}
                         >
                           {label}
                           {alert && <span className="absolute top-1.5 right-1/4 w-1.5 h-1.5 bg-amber-400 rounded-full" />}

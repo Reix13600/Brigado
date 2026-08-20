@@ -39,6 +39,18 @@ service cloud.firestore {
       }
     }
 
+    // Public projection for the Landing page's logo carousel — see
+    // ApprovedLogo's doc comment in types.ts for why this is a separate
+    // collection rather than a query against `restaurants` (which holds
+    // owner contact info and other data that must never be broadly
+    // listable). Written ONLY by the adminSetLogoApproval callable
+    // (Admin SDK, bypasses these rules) — never client-writable, so an
+    // unapproved or since-rejected logo can never appear here.
+    match /approvedLogos/{slug} {
+      allow read: if true;
+      allow write: if false;
+    }
+
     function isManagerOf(restaurantId) {
       return request.auth != null
         && exists(/databases/$(database)/documents/managers/$(request.auth.uid))

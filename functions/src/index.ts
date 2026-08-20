@@ -991,6 +991,9 @@ export const adminListBusinesses = onCall(async (request) => {
       adminNotes: x.adminNotes || "",
       hasStripe: !!x.stripeCustomerId,
       deletionReason: x.deletionReason || null,
+      logoUrl: x.logoUrl || null,
+      logoConsentGiven: !!x.logoConsentGiven,
+      logoApprovalStatus: x.logoApprovalStatus || null,
     };
   });
   return { businesses };
@@ -1120,6 +1123,57 @@ export const adminSetNotes = onCall(async (request) => {
   await db.doc(`restaurants/${slug}`).update({ adminNotes: String(notes ?? "").slice(0, 4000) });
   logger.info(`ADMIN: ${adminEmail} updated notes on ${slug}`);
   return { ok: true };
+});
+
+/**
+ * Approve or reject a manager-uploaded logo for the Landing page
+ * carousel. This is the ONLY writer of `approvedLogos` — a logo is
+ * genuinely public only once this has run with status "approved", and
+ * un-approving/rejecting removes it from that collection immediately
+ * (the underlying Storage file and the tenant doc's logoUrl are left
+ * alone; only public exposure is toggled here).
+ *
+ * Requires the tenant to have actually given consent (logoConsentGiven)
+ * — belt-and-suspenders on top of the client already blocking upload
+ * without it; an admin action can never be the path that makes an
+ * unconsented logo public.
+ */
+export const adminSetLogoApproval = onCall(async (request) => {
+  const adminEmail = await assertCallerIsPlatformAdmin(request.auth);
+  const { slug, status } = request.data as { slug?: string; status?: "approved" | "rejected" };
+  if (!slug) throw new HttpsError("invalid-argument", "slug is required");
+  if (status !== "approved" && status !== "rejected") {
+    throw new HttpsError("invalid-argument", "status must be 'approved' or 'rejected'");
+  }
+
+  const restoRef = db.doc(`restaurants/${slug}`);
+  const snap = await restoRef.get();
+  if (!snap.exists) throw new HttpsError("not-found", "Restaurant not found");
+  const data = snap.data() || {};
+
+  if (status === "approved" && !data.logoConsentGiven) {
+    throw new HttpsError("failed-precondition", "This tenant has not given consent to display their logo");
+  }
+  if (status === "approved" && !data.logoUrl) {
+    throw new HttpsError("failed-precondition", "This tenant has no uploaded logo");
+  }
+
+  await restoRef.update({ logoApprovalStatus: status });
+
+  const approvedLogoRef = db.doc(`approvedLogos/${slug}`);
+  if (status === "approved") {
+    await approvedLogoRef.set({
+      slug,
+      logoUrl: data.logoUrl,
+      restaurantName: data.config?.resto_name || slug,
+      approvedAt: new Date().toISOString(),
+    });
+  } else {
+    await approvedLogoRef.delete();
+  }
+
+  logger.warn(`ADMIN: ${adminEmail} set logo approval for ${slug} to ${status}`);
+  return { ok: true, slug, status };
 });
 
 // ── Admin management ─────────────────────────────────────────────────

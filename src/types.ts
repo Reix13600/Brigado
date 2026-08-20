@@ -181,6 +181,11 @@ export interface PrivateMessage {
   from: "manager" | "staff";
   text: string;
   sentAt: string; // ISO
+  // Set when the RECIPIENT (the party who didn't send it) opens the
+  // thread. Absent = unread. This is the real read state — "unread" was
+  // previously (wrongly) inferred from "who sent the last message",
+  // which never cleared for a read-but-not-replied-to message.
+  readAt?: string;
 }
 
 export type TimeOffStatus = "pending" | "approved" | "denied";
@@ -269,4 +274,27 @@ export interface AppData {
   // UI list/invite/remove managers without needing a Firestore query
   // capability the security rules don't otherwise allow.
   managerEmails?: string[];
+  // Logo upload + consent + admin approval for the marketing site's
+  // "Trusted by" carousel. logoUrl exists as soon as a manager uploads
+  // one; it is NEVER shown publicly without BOTH logoConsentGiven and
+  // logoApprovalStatus === "approved" — see the `approvedLogos` public
+  // collection below, which is the only thing Landing.tsx actually reads.
+  logoUrl?: string;
+  logoConsentGiven?: boolean;
+  logoConsentAt?: string; // ISO
+  logoApprovalStatus?: "pending" | "approved" | "rejected";
+}
+
+// PUBLIC, purpose-built projection for the Landing page's logo carousel —
+// deliberately NOT a query against `restaurants` (that collection holds
+// owner contact info, config, etc.; a broad `list` rule there to support
+// a public carousel would leak all of it). Written ONLY by the
+// `adminSetLogoApproval` callable (Admin SDK, bypasses client rules) when
+// a logo is approved, and deleted by the same callable on rejection/
+// un-approval — never client-writable.
+export interface ApprovedLogo {
+  slug: string;
+  logoUrl: string;
+  restaurantName: string;
+  approvedAt: string; // ISO
 }

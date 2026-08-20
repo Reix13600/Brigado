@@ -28,10 +28,10 @@ import {
   saveConfig, saveStaff, saveEntry, deleteEntry, approveAllEntries,
   approveEntriesByRole, saveAdvance, deleteAdvance, saveDayNote, saveWeekNote, clearAllData,
   saveScheduledShift, deleteScheduledShift,
-  postAnnouncement, deleteAnnouncement, sendMessage, decideTimeOffRequest, decideSwap,
+  postAnnouncement, deleteAnnouncement, sendMessage, markThreadRead, decideTimeOffRequest, decideSwap,
   saveTimeOffNote, saveSwapNote, deleteStaffMemberData,
   invalidateVarianceApproval,
-  saveShiftTemplate, deleteShiftTemplate
+  saveShiftTemplate, deleteShiftTemplate, uploadRestaurantLogo
 } from "../utils/api";
 import { 
   Users, Calendar, DollarSign, BarChart3, Settings, Clipboard,
@@ -185,6 +185,11 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
   const [deductions, setDeductions] = useState<Deduction[]>([{ id: "tax", label: "Tax", rate: 22 }]);
   const [approvalRequired, setApprovalRequired] = useState<boolean>(true);
   const [bookkeeperEmail, setBookkeeperEmail] = useState<string>("");
+  // Phase E: logo upload + consent (Part 3 of the same series)
+  const [logoFile, setLogoFile] = useState<File | null>(null);
+  const [logoConsentChecked, setLogoConsentChecked] = useState<boolean>(false);
+  const [logoUploading, setLogoUploading] = useState<boolean>(false);
+  const [logoUploadError, setLogoUploadError] = useState<string>("");
   const [sheetUrl, setSheetUrl] = useState<string>("");
   const [enableScheduling, setEnableScheduling] = useState<boolean>(true);
   const [complianceEnforced, setComplianceEnforced] = useState<boolean>(true);
@@ -486,10 +491,12 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
   const pendingTimeOff = appData.timeOffRequests.filter(r => r.status === "pending");
   const claimedSwaps = appData.swapRequests.filter(r => r.status === "claimed");
   const requestsBadgeCount = pendingTimeOff.length + claimedSwaps.length;
-  const unreadThreads = Array.from(new Set(appData.messages.map(m => m.staffName))).filter(name => {
-    const thread = appData.messages.filter(m => m.staffName === name).sort((a, b) => b.sentAt.localeCompare(a.sentAt));
-    return thread[0]?.from === "staff";
-  });
+  // Real read state (readAt) — "who sent the last message" never cleared
+  // for a message the manager read but didn't reply to. See
+  // markThreadRead in api.ts (fixed alongside the same bug on the staff side).
+  const unreadThreads = Array.from(new Set(appData.messages.map(m => m.staffName))).filter(name =>
+    appData.messages.some(m => m.staffName === name && m.from === "staff" && !m.readAt)
+  );
   const messagesBadgeCount = unreadThreads.length;
 
   // ── CORE DATA SAVE TRIGGERS ─────────────────────────
@@ -539,6 +546,26 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
       alert(t("saved"));
     } catch (err) {
       console.error(err);
+    }
+  };
+
+  // Phase E: upload the logo. The consent checkbox gates the button
+  // itself (disabled unless checked) AND is re-checked inside
+  // uploadRestaurantLogo — no path to a public logo without it.
+  const triggerUploadLogo = async () => {
+    if (!logoFile || !logoConsentChecked) return;
+    setLogoUploading(true);
+    setLogoUploadError("");
+    try {
+      await uploadRestaurantLogo(logoFile, logoConsentChecked);
+      onRefresh();
+      setLogoFile(null);
+      setLogoConsentChecked(false);
+    } catch (err) {
+      console.error(err);
+      setLogoUploadError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLogoUploading(false);
     }
   };
 
@@ -3321,11 +3348,16 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                                                 <Copy size={10} />
                                               </button>
                                               {warnings.length > 0 && (
-                                                <span 
-                                                  className={`font-extrabold cursor-help text-xs ${hasOverlapConflict ? "text-rose-400" : "text-amber-400"} ${printHideAlerts ? "print:hidden" : ""}`} 
-                                                  title={warnings.join("\n")}
-                                                >
-                                                  ⚠️
+                                                <span className={printHideAlerts ? "print:hidden" : ""} onClick={e => e.stopPropagation()}>
+                                                  <InfoTooltip
+                                                    text={warnings.join("\n")}
+                                                    preWrap
+                                                    trigger={
+                                                      <span className={`font-extrabold cursor-pointer text-xs ${hasOverlapConflict ? "text-rose-400" : "text-amber-400"}`}>
+                                                        ⚠️
+                                                      </span>
+                                                    }
+                                                  />
                                                 </span>
                                               )}
                                             </div>
@@ -3957,13 +3989,15 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="space-y-1.5 md:col-span-1">
                 {appData.staff.map(s => {
-                  const thread = appData.messages.filter(m => m.staffName === s.name).sort((a, b) => b.sentAt.localeCompare(a.sentAt));
-                  const hasUnread = thread[0]?.from === "staff";
+                  const hasUnread = appData.messages.some(m => m.staffName === s.name && m.from === "staff" && !m.readAt);
                   return (
                     <button
                       key={s.name}
                       className={`w-full text-left px-3 py-2 rounded-xl text-xs font-semibold flex items-center justify-between transition-all ${selectedMessageThread === s.name ? "bg-lime-400/10 text-lime-400" : "bg-slate-950/40 text-slate-300 hover:bg-slate-800"}`}
-                      onClick={() => setSelectedMessageThread(s.name)}
+                      onClick={() => {
+                        setSelectedMessageThread(s.name);
+                        if (hasUnread) markThreadRead(s.name, "manager").then(onRefresh).catch(console.error);
+                      }}
                     >
                       {s.name}
                       {hasUnread && <span className="w-2 h-2 rounded-full bg-amber-400" />}
@@ -4042,6 +4076,73 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                 </div>
               </div>
               <button className="px-5 py-2.5 bg-lime-400 hover:bg-lime-300 text-slate-950 text-xs font-bold rounded-xl transition-all shadow-md" onClick={triggerSaveGeneral}>{t("save")}</button>
+            </div>
+
+            {/* RESTAURANT LOGO — upload + consent + admin-approval status.
+                Uploading is never itself publication: it always lands as
+                "pending" and only a platform admin's approval puts it on
+                the marketing site's Trusted-by carousel. */}
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4 shadow-lg">
+              <h3 className="text-sm font-semibold text-slate-100 flex items-center gap-2">
+                🖼️ {lang === "fr" ? "Logo du restaurant" : "Restaurant logo"}
+              </h3>
+              <p className="text-[11px] text-slate-500 leading-normal">
+                {lang === "fr"
+                  ? "Optionnel. Si vous l'autorisez, votre logo peut apparaître dans la section « Ils nous font confiance » du site Brigado, après validation."
+                  : "Optional. If you allow it, your logo may appear in the \"Trusted by\" section on the Brigado marketing site, once reviewed."}
+              </p>
+
+              {appData.logoUrl && (
+                <div className="flex items-center gap-3 bg-slate-950/40 border border-slate-800/60 rounded-xl p-3">
+                  <img src={appData.logoUrl} alt="" className="w-12 h-12 rounded-lg object-contain bg-white flex-shrink-0" />
+                  <div className="text-xs">
+                    <span
+                      className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                        appData.logoApprovalStatus === "approved" ? "bg-lime-400/10 text-lime-400"
+                        : appData.logoApprovalStatus === "rejected" ? "bg-rose-400/10 text-rose-400"
+                        : "bg-amber-400/10 text-amber-400"
+                      }`}
+                    >
+                      {appData.logoApprovalStatus === "approved" ? (lang === "fr" ? "Approuvé — en ligne" : "Approved — live")
+                        : appData.logoApprovalStatus === "rejected" ? (lang === "fr" ? "Refusé" : "Rejected")
+                        : (lang === "fr" ? "En attente de validation" : "Pending review")}
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              <div>
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={e => setLogoFile(e.target.files?.[0] || null)}
+                  className="w-full text-xs text-slate-400 file:mr-3 file:py-2 file:px-3 file:rounded-lg file:border-0 file:bg-slate-800 file:text-slate-200 file:text-xs file:font-semibold hover:file:bg-slate-700"
+                />
+              </div>
+
+              <label className="flex items-start gap-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={logoConsentChecked}
+                  onChange={e => setLogoConsentChecked(e.target.checked)}
+                  className="mt-0.5 w-3.5 h-3.5 accent-lime-400 flex-shrink-0"
+                />
+                <span className="text-[11px] text-slate-400 leading-normal">
+                  {lang === "fr"
+                    ? "J'accepte que Brigado puisse afficher ce logo sur le site marketing de Brigado."
+                    : "I agree Brigado may display this logo on the Brigado marketing site."}
+                </span>
+              </label>
+
+              {logoUploadError && <p className="text-[11px] text-rose-400">{logoUploadError}</p>}
+
+              <button
+                className="px-5 py-2.5 bg-lime-400 hover:bg-lime-300 text-slate-950 text-xs font-bold rounded-xl transition-all shadow-md disabled:opacity-40"
+                disabled={!logoFile || !logoConsentChecked || logoUploading}
+                onClick={triggerUploadLogo}
+              >
+                {logoUploading ? (lang === "fr" ? "Envoi…" : "Uploading…") : (lang === "fr" ? "Envoyer le logo" : "Upload logo")}
+              </button>
             </div>
 
             {/* MANAGERS */}
@@ -4440,22 +4541,6 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
               </div>
             </div>
 
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4 shadow-lg">
-              <h3 className="text-sm font-semibold text-slate-100 flex items-center gap-2">
-                <Mail size={15} /> {t("bookkeeper")}
-              </h3>
-              <div className="space-y-3">
-                <div>
-                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1.5">{t("emailAddress")}</label>
-                  <input className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-slate-200 focus:outline-none focus:border-lime-400/50 placeholder-slate-600" type="email" placeholder={t("emailPlaceholder")} value={bookkeeperEmail} onChange={e => setBookkeeperEmail(e.target.value)} />
-                </div>
-                <div>
-                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1.5">{t("sheetsUrl")}</label>
-                  <input className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-slate-200 focus:outline-none focus:border-lime-400/50 placeholder-slate-600" placeholder={t("sheetsPlaceholder")} value={sheetUrl} onChange={e => setSheetUrl(e.target.value)} />
-                </div>
-              </div>
-              <button className="px-5 py-2.5 bg-lime-400 hover:bg-lime-300 text-slate-950 text-xs font-bold rounded-xl transition-all shadow-md" onClick={triggerSaveBookkeeper}>{t("save")}</button>
-            </div>
           </div>
 
           {/* RIGHT: STAFF LIST MANAGEMENT & QR */}
@@ -4660,6 +4745,29 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
               >
                 {t("printQR")}
               </button>
+            </div>
+
+            {/* BOOKKEEPER — moved here from the left column: keeps it
+                directly above Danger Zone (was previously separated by
+                an entire column) and rebalances the two columns' heights,
+                since the left column (Info+Managers+Hours&Tax) already
+                ran noticeably taller than the right, leaving visible
+                empty space under the right column on desktop. */}
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4 shadow-lg">
+              <h3 className="text-sm font-semibold text-slate-100 flex items-center gap-2">
+                <Mail size={15} /> {t("bookkeeper")}
+              </h3>
+              <div className="space-y-3">
+                <div>
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1.5">{t("emailAddress")}</label>
+                  <input className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-slate-200 focus:outline-none focus:border-lime-400/50 placeholder-slate-600" type="email" placeholder={t("emailPlaceholder")} value={bookkeeperEmail} onChange={e => setBookkeeperEmail(e.target.value)} />
+                </div>
+                <div>
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1.5">{t("sheetsUrl")}</label>
+                  <input className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-slate-200 focus:outline-none focus:border-lime-400/50 placeholder-slate-600" placeholder={t("sheetsPlaceholder")} value={sheetUrl} onChange={e => setSheetUrl(e.target.value)} />
+                </div>
+              </div>
+              <button className="px-5 py-2.5 bg-lime-400 hover:bg-lime-300 text-slate-950 text-xs font-bold rounded-xl transition-all shadow-md" onClick={triggerSaveBookkeeper}>{t("save")}</button>
             </div>
 
             {/* DANGER ZONE */}

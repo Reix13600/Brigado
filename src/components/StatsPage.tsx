@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import {
   ResponsiveContainer, BarChart, Bar, AreaChart, Area, PieChart, Pie, Cell,
-  RadialBarChart, RadialBar, LineChart, Line,
+  RadialBarChart, RadialBar, LineChart, Line, ComposedChart,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
 } from "recharts";
 import { BarChart3, AlertTriangle, Flag, Gauge, ChevronLeft, ChevronRight, X, Mail, TrendingUp, TrendingDown, Minus, CalendarDays } from "lucide-react";
@@ -197,11 +197,19 @@ export default function StatsPage({ appData, lang, theme, onRefresh }: StatsPage
     const idx = (d.getDay() + 6) % 7;
     busiestDayHours[idx] += e.hours;
   });
-  const busiestDayData = dayLabels.map((label, i) => ({
-    day: label,
-    hours: Math.round(busiestDayHours[i] * 10) / 10,
-    isWeekend: i >= 5,
-  }));
+  const busiestWeekTotal = busiestDayHours.reduce((s, h) => s + h, 0);
+  const busiestDayAvg = busiestWeekTotal / 7;
+  let runningCumulative = 0;
+  const busiestDayData = dayLabels.map((label, i) => {
+    runningCumulative += busiestDayHours[i];
+    return {
+      day: label,
+      hours: Math.round(busiestDayHours[i] * 10) / 10,
+      avg: Math.round(busiestDayAvg * 10) / 10,
+      cumulative: Math.round(runningCumulative * 10) / 10,
+      isWeekend: i >= 5,
+    };
+  });
   const busiestDay = busiestDayData.reduce((max, d) => (d.hours > max.hours ? d : max), busiestDayData[0]);
   const dateFmt = (d: Date) => d.toLocaleDateString(lang === "fr" ? "fr-FR" : "en-US", { day: "2-digit", month: "short" });
   const busiestWeekLabel = `${dateFmt(busiestWeekStart)} – ${dateFmt(busiestWeekEnd)}`;
@@ -581,14 +589,28 @@ export default function StatsPage({ appData, lang, theme, onRefresh }: StatsPage
                 {lang === "fr" ? "Heures moy./semaine vs. contrat" : "Avg weekly hours vs. contract"}
               </h3>
               <ResponsiveContainer width="100%" height={220}>
-                <BarChart data={otData} layout="vertical" margin={{ left: 10 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke={chartGridColor} />
+                <BarChart data={otData} layout="vertical" margin={{ left: 10 }} barCategoryGap={10}>
+                  <defs>
+                    <linearGradient id="contractGradient" x1="0" y1="0" x2="1" y2="0">
+                      <stop offset="0%" stopColor={theme === "light" ? "#cbd5e1" : "#334155"} stopOpacity={0.5} />
+                      <stop offset="100%" stopColor={theme === "light" ? "#cbd5e1" : "#334155"} stopOpacity={0.9} />
+                    </linearGradient>
+                    <linearGradient id="avgWeeklyGradient" x1="0" y1="0" x2="1" y2="0">
+                      <stop offset="0%" stopColor="#a3e635" stopOpacity={0.55} />
+                      <stop offset="100%" stopColor="#a3e635" stopOpacity={1} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke={chartGridColor} horizontal={false} />
                   <XAxis type="number" tick={{ fontSize: 10, fill: chartAxisColor }} />
                   <YAxis type="category" dataKey="name" width={70} tick={{ fontSize: 10, fill: chartAxisColor }} />
-                  <Tooltip contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle} />
+                  <Tooltip
+                    contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
+                    formatter={(v: number, name: string) => [`${v.toFixed(1)}h`, name]}
+                    cursor={{ fill: theme === "light" ? "#f1f5f9" : "#1e293b", opacity: 0.5 }}
+                  />
                   <Legend wrapperStyle={{ fontSize: 10 }} formatter={(value: string) => <span style={{ color: chartAxisColor }}>{value}</span>} />
-                  <Bar dataKey="contract" name={lang === "fr" ? "Contrat" : "Contract"} fill={theme === "light" ? "#cbd5e1" : "#334155"} radius={[0, 4, 4, 0]} />
-                  <Bar dataKey="avgWeekly" name={lang === "fr" ? "Moy. réel" : "Avg actual"} fill="#a3e635" radius={[0, 4, 4, 0]} />
+                  <Bar dataKey="contract" name={lang === "fr" ? "Contrat" : "Contract"} fill="url(#contractGradient)" radius={[0, 6, 6, 0]} />
+                  <Bar dataKey="avgWeekly" name={lang === "fr" ? "Moy. réel" : "Avg actual"} fill="url(#avgWeeklyGradient)" radius={[0, 6, 6, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -626,15 +648,38 @@ export default function StatsPage({ appData, lang, theme, onRefresh }: StatsPage
                 {lang === "fr" ? `Le plus chargé : ${busiestDay?.day ?? "—"}` : `Busiest: ${busiestDay?.day ?? "—"}`}
               </p>
               <ResponsiveContainer width="100%" height={200}>
-                <BarChart data={busiestDayData}>
+                <ComposedChart data={busiestDayData} margin={{ right: 8 }}>
+                  <defs>
+                    <linearGradient id="busiestCumulativeGradient" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="#a78bfa" stopOpacity={0.35} />
+                      <stop offset="100%" stopColor="#a78bfa" stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
                   <CartesianGrid strokeDasharray="3 3" stroke={chartGridColor} />
                   <XAxis dataKey="day" tick={{ fontSize: 10, fill: chartAxisColor }} />
-                  <YAxis tick={{ fontSize: 10, fill: chartAxisColor }} />
-                  <Tooltip contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle} formatter={(v: number) => [`${v}h`, lang === "fr" ? "Heures" : "Hours"]} />
-                  <Bar dataKey="hours" radius={[6, 6, 0, 0]}>
-                    {busiestDayData.map((d, i) => <Cell key={i} fill={d.isWeekend ? "#60a5fa" : "#a3e635"} />)}
+                  <YAxis yAxisId="hours" tick={{ fontSize: 10, fill: chartAxisColor }} />
+                  <YAxis yAxisId="cumulative" orientation="right" tick={{ fontSize: 10, fill: chartAxisColor }} tickFormatter={v => `${v}h`} />
+                  <Tooltip
+                    contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
+                    formatter={(v: number, name: string) => [
+                      `${v}h`,
+                      name === "hours" ? (lang === "fr" ? "Heures" : "Hours")
+                        : name === "avg" ? (lang === "fr" ? "Moyenne" : "Average")
+                        : (lang === "fr" ? "Cumul semaine" : "Week running total"),
+                    ]}
+                  />
+                  {/* Area: cumulative hours through the week, right-hand axis
+                      — "how the week fills up", not comparable in scale to a
+                      single day's bar so it gets its own axis. */}
+                  <Area yAxisId="cumulative" type="monotone" dataKey="cumulative" stroke="#a78bfa" strokeWidth={1.5} fill="url(#busiestCumulativeGradient)" name={lang === "fr" ? "Cumul" : "Running total"} />
+                  {/* Bar: hours per day, weekend days tinted like every other grid in the app. */}
+                  <Bar yAxisId="hours" dataKey="hours" radius={[6, 6, 0, 0]} name={lang === "fr" ? "Heures" : "Hours"}>
+                    {busiestDayData.map((d, i) => <Cell key={i} fill={d.isWeekend ? "#38bdf8" : "#a3e635"} />)}
                   </Bar>
-                </BarChart>
+                  {/* Line: flat daily-average reference, so a bar reads as
+                      above/below average at a glance. */}
+                  <Line yAxisId="hours" type="monotone" dataKey="avg" stroke="#fbbf24" strokeWidth={1.5} strokeDasharray="4 3" dot={false} name={lang === "fr" ? "Moyenne" : "Average"} />
+                </ComposedChart>
               </ResponsiveContainer>
             </div>
 
@@ -765,6 +810,27 @@ export default function StatsPage({ appData, lang, theme, onRefresh }: StatsPage
                     <div className="text-3xl font-mono font-bold" style={{ color: gaugeColor }}>{costPctOfRevenue.toFixed(1)}%</div>
                     <div className="text-[10px] text-slate-500 mt-1">
                       {lang === "fr" ? `${weeksWithRevenue.length} sem. avec CA renseigné` : `${weeksWithRevenue.length} wks with revenue entered`}
+                    </div>
+                    {/* Scale reference so the number reads in context at a
+                        glance, without needing the caption text above —
+                        same plain-div banded-bar pattern already used for
+                        the weekly digest's role comparison further up
+                        this file, not a new visual language. */}
+                    <div className="mt-3 px-2">
+                      <div className="relative h-1.5 rounded-full overflow-hidden flex">
+                        <div className="h-full bg-lime-500/70" style={{ width: "35%" }} />
+                        <div className="h-full bg-amber-500/70" style={{ width: "10%" }} />
+                        <div className="h-full bg-rose-500/70 flex-1" />
+                        <div
+                          className="absolute top-1/2 -translate-y-1/2 w-2 h-2 rounded-full border-2 border-slate-950"
+                          style={{ left: `${Math.min(costPctOfRevenue, 100)}%`, marginLeft: -4, backgroundColor: gaugeColor }}
+                        />
+                      </div>
+                      <div className="flex justify-between text-[8px] text-slate-600 font-mono mt-1">
+                        <span>0%</span>
+                        <span>35%</span>
+                        <span>100%</span>
+                      </div>
                     </div>
                   </div>
                 )}

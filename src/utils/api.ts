@@ -2,13 +2,14 @@ import {
   doc, getDoc, setDoc, updateDoc, deleteDoc,
   collection, getDocs, query, where, limit, writeBatch,
 } from "firebase/firestore";
-import { auth, db, getRestaurantId } from "../firebase";
+import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
+import { auth, db, storage, getRestaurantId } from "../firebase";
 import { defaultComplianceRules } from "./compliance";
 import { isBlockedStatus } from "./tenantStatus";
 import { varianceApprovalId } from "./variance";
 import {
   AppData, GeneralConfig, StaffMember, HourEntry, CashAdvance, ScheduledShift, ActiveClockIn, Shift,
-  Announcement, PrivateMessage, TimeOffRequest, SwapRequest, VarianceApproval, ShiftTemplate,
+  Announcement, PrivateMessage, TimeOffRequest, SwapRequest, VarianceApproval, ShiftTemplate, ApprovedLogo,
 } from "../types";
 
 // These are functions, not constants — RESTAURANT_ID is resolved fresh on
@@ -198,6 +199,10 @@ export async function fetchAppData(): Promise<AppData> {
     trialExpiredAt: restoData.trialExpiredAt,
     lastActiveAt: restoData.lastActiveAt,
     managerEmails: restoData.managerEmails ?? [],
+    logoUrl: restoData.logoUrl,
+    logoConsentGiven: restoData.logoConsentGiven,
+    logoConsentAt: restoData.logoConsentAt,
+    logoApprovalStatus: restoData.logoApprovalStatus,
   };
 }
 
@@ -456,6 +461,29 @@ export async function sendMessage(staffName: string, from: "manager" | "staff", 
   return getAllMessages();
 }
 
+/**
+ * Marks a thread's incoming messages as read. `viewerRole` is who's
+ * opening the thread right now — marks every message from the OTHER
+ * party that doesn't already have `readAt`. Bug this fixes: "unread"
+ * used to be inferred from "who sent the last message" (from !== me),
+ * which never cleared once the reader viewed but didn't reply — the dot
+ * stayed on indefinitely. This is the real read receipt.
+ */
+export async function markThreadRead(staffName: string, viewerRole: "manager" | "staff"): Promise<PrivateMessage[]> {
+  const otherParty = viewerRole === "manager" ? "staff" : "manager";
+  const snap = await getDocs(
+    query(messagesCol(), where("staffName", "==", staffName), where("from", "==", otherParty))
+  );
+  const unread = snap.docs.filter(d => !(d.data() as PrivateMessage).readAt);
+  if (unread.length > 0) {
+    const batch = writeBatch(db);
+    const readAt = new Date().toISOString();
+    unread.forEach(d => batch.update(d.ref, { readAt }));
+    await batch.commit();
+  }
+  return getAllMessages();
+}
+
 // ── TIME OFF REQUESTS ───────────────────────────────────────────────
 
 export async function requestTimeOff(staffName: string, startDate: string, endDate: string, reason: string): Promise<TimeOffRequest[]> {
@@ -653,4 +681,58 @@ export async function deleteStaffMemberData(name: string): Promise<{ staff: Staf
 
   const [entries, advances] = await Promise.all([getAllEntries(), getAllAdvances()]);
   return { staff, entries, advances };
+}
+
+// ── RESTAURANT LOGO (upload, consent, public carousel) ──────────────
+// See ApprovedLogo's doc comment in types.ts for why the public-facing
+// read goes through a separate `approvedLogos` collection rather than a
+// query against `restaurants` directly.
+
+/**
+ * Uploads a manager's logo file to Storage and records it on the tenant
+ * doc, along with the consent decision. `consentGiven` MUST be true — the
+ * UI's checkbox is the only path to true, but this is checked here too
+ * so a future call site can't accidentally skip it. Always starts at
+ * logoApprovalStatus "pending": uploading is never itself publication,
+ * see the admin approval gate (adminSetLogoApproval, functions/).
+ *
+ * Storage path is keyed by the UPLOADER'S OWN UID (`logos/{uid}/...`),
+ * not the restaurant slug — see storage.rules' own comment for why: a
+ * cross-service Storage-Rules-to-Firestore isManagerOf() check proved
+ * unreliable in the local emulator, so the uid-keyed path (which needs
+ * no cross-service call to secure) is used instead. The actual
+ * restaurant association happens right below, in the Firestore write —
+ * an ordinary isManagerOf()-gated update, the same proven rule every
+ * other manager-only field on this doc already relies on.
+ */
+export async function uploadRestaurantLogo(file: File, consentGiven: boolean): Promise<string> {
+  if (!consentGiven) {
+    throw new Error("Cannot upload a logo without consent to display it on the marketing site.");
+  }
+  const uid = auth.currentUser?.uid;
+  if (!uid) {
+    throw new Error("Must be signed in as a manager to upload a logo.");
+  }
+  const ext = (file.name.split(".").pop() || "png").toLowerCase();
+  const path = `logos/${uid}/logo-${Date.now()}.${ext}`;
+  const storageRef = ref(storage, path);
+  await uploadBytes(storageRef, file, { contentType: file.type });
+  const logoUrl = await getDownloadURL(storageRef);
+
+  await updateDoc(restoRef(), {
+    logoUrl,
+    logoConsentGiven: true,
+    logoConsentAt: new Date().toISOString(),
+    logoApprovalStatus: "pending",
+  });
+
+  return logoUrl;
+}
+
+/** Public: every approved logo, for the Landing page carousel. No auth
+ * required — `approvedLogos` is `allow read: if true` by design (see
+ * types.ts), and this is the ONLY function that reads it. */
+export async function getApprovedLogos(): Promise<ApprovedLogo[]> {
+  const snap = await getDocs(collection(db, "approvedLogos"));
+  return snap.docs.map(d => d.data() as ApprovedLogo);
 }

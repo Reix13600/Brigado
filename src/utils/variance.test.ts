@@ -3,6 +3,7 @@ import {
   computeDayVariance,
   aggregateMonthlyVariance,
   varianceApprovalId,
+  AUTO_APPROVE_THRESHOLD_MINUTES,
 } from "./variance";
 import { HourEntry, ScheduledShift, VarianceApproval, Shift } from "../types";
 
@@ -194,6 +195,65 @@ describe("varianceApprovalId — deterministic, URI-safe doc id", () => {
 
   it("is stable across repeated calls (pure)", () => {
     expect(varianceApprovalId("2026-08-10", "Marie")).toBe(varianceApprovalId("2026-08-10", "Marie"));
+  });
+});
+
+describe("aggregateMonthlyVariance — auto-approve toggle (Part 8)", () => {
+  it("default (autoApproveEnabled omitted) — a small delta with no approval record stays pending, exactly as before this feature existed", () => {
+    const sched = [scheduled("Marie", "2026-08-04", "09:00", "17:00", 8)];
+    const entries = [worked("Marie", "2026-08-04", [shift("09:00", "17:05", minToHours(485))])]; // +5 min
+    const summary = aggregateMonthlyVariance("Marie", entries, sched, []);
+    expect(summary.days[0].status).toBe("pending");
+  });
+
+  it("enabled + delta under the threshold + no approval record → auto-approved, with NO approval object (nothing was ever written)", () => {
+    const sched = [scheduled("Marie", "2026-08-04", "09:00", "17:00", 8)];
+    const entries = [worked("Marie", "2026-08-04", [shift("09:00", "17:05", minToHours(485))])]; // +5 min
+    const summary = aggregateMonthlyVariance("Marie", entries, sched, [], true);
+    expect(summary.days[0].status).toBe("auto-approved");
+    expect(summary.days[0].approval).toBeNull();
+    // Effectively approved for counting purposes: folds into approvedHours, not pendingHours.
+    expect(summary.approvedHours).toBeCloseTo(5 / 60, 5);
+    expect(summary.pendingHours).toBe(0);
+  });
+
+  it("enabled + delta AT the threshold (not under it) → still pending, not auto-approved — boundary is exclusive", () => {
+    const sched = [scheduled("Marie", "2026-08-04", "09:00", "17:00", 8)];
+    const entries = [worked("Marie", "2026-08-04", [shift("09:00", "17:15", minToHours(495))])]; // +15 min exactly
+    const summary = aggregateMonthlyVariance("Marie", entries, sched, [], true);
+    expect(summary.days[0].deltaMinutes).toBeCloseTo(AUTO_APPROVE_THRESHOLD_MINUTES, 5);
+    expect(summary.days[0].status).toBe("pending");
+  });
+
+  it("enabled + delta over the threshold → pending, unaffected by the toggle", () => {
+    const sched = [scheduled("Marie", "2026-08-04", "09:00", "17:00", 8)];
+    const entries = [worked("Marie", "2026-08-04", [shift("09:00", "17:35", minToHours(515))])]; // +35 min
+    const summary = aggregateMonthlyVariance("Marie", entries, sched, [], true);
+    expect(summary.days[0].status).toBe("pending");
+  });
+
+  it("a REAL manual approval always wins over auto-approve, even when the delta also qualifies — a genuine human decision is never downgraded to computed status", () => {
+    const sched = [scheduled("Marie", "2026-08-04", "09:00", "17:00", 8)];
+    const entries = [worked("Marie", "2026-08-04", [shift("09:00", "17:05", minToHours(485))])]; // +5 min
+    const approvals: VarianceApproval[] = [
+      { name: "Marie", date: "2026-08-04", approvedBy: "manager@lavague.fr", approvedAt: new Date().toISOString() },
+    ];
+    const summary = aggregateMonthlyVariance("Marie", entries, sched, approvals, true);
+    expect(summary.days[0].status).toBe("approved");
+    expect(summary.days[0].approval?.approvedBy).toBe("manager@lavague.fr");
+  });
+
+  it("reversibility — toggling the flag off on the SAME underlying data (no approvals array changed) reverts an auto-approved day to pending, proving nothing was persisted for it", () => {
+    const sched = [scheduled("Marie", "2026-08-04", "09:00", "17:00", 8)];
+    const entries = [worked("Marie", "2026-08-04", [shift("09:00", "17:05", minToHours(485))])];
+    const noApprovals: VarianceApproval[] = [];
+
+    const withToggleOn = aggregateMonthlyVariance("Marie", entries, sched, noApprovals, true);
+    expect(withToggleOn.days[0].status).toBe("auto-approved");
+
+    const withToggleOff = aggregateMonthlyVariance("Marie", entries, sched, noApprovals, false);
+    expect(withToggleOff.days[0].status).toBe("pending");
+    expect(withToggleOff.pendingHours).toBeCloseTo(5 / 60, 5);
   });
 });
 

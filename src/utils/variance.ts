@@ -139,7 +139,19 @@ export function computeDayVariance(
   };
 }
 
-export type VarianceStatus = "approved" | "pending";
+// "auto-approved" is a COMPUTED status, never persisted (see
+// aggregateMonthlyVariance's autoApproveEnabled param below) — it exists
+// so a day can be counted as effectively approved for display/totals
+// purposes without a real VarianceApproval doc ever being written, and
+// so callers can render it visually distinct from a genuine manual
+// "approved" (approvedBy is only ever set for the latter).
+export type VarianceStatus = "approved" | "pending" | "auto-approved";
+
+// A day auto-approves only when the delta is small enough that it isn't
+// worth a human's attention. Fixed at 15 minutes per the feature spec —
+// not manager-configurable (only the on/off toggle is), so there is
+// exactly one number to reason about across the whole codebase.
+export const AUTO_APPROVE_THRESHOLD_MINUTES = 15;
 
 export interface DayVarianceWithStatus extends DayVariance {
   status: VarianceStatus;
@@ -175,12 +187,26 @@ export interface MonthlyVarianceSummary {
  * differenceHours (clockedHours - scheduledHours) exactly equals
  * approvedHours + pendingHours, with no separate rounding path to drift
  * out of sync.
+ *
+ * `autoApproveEnabled` (default false — every existing caller keeps
+ * today's exact behaviour) implements the auto-approve toggle: a day
+ * with NO real VarianceApproval doc and |deltaMinutes| below
+ * AUTO_APPROVE_THRESHOLD_MINUTES is COMPUTED as "auto-approved" and its
+ * minutes fold into approvedHours (it IS effectively approved for
+ * counting purposes) rather than pendingHours. This is purely a
+ * per-call computation — nothing is written, so flipping the setting
+ * off makes these days revert to "pending" on the very next render, with
+ * zero data migration. Callers must render "auto-approved" visibly
+ * distinct from a real "approved" (see VarianceTab.tsx) — `day.approval`
+ * stays null for an auto-approved day precisely because no one actually
+ * approved it.
  */
 export function aggregateMonthlyVariance(
   name: string,
   entries: readonly HourEntry[],
   allScheduled: readonly ScheduledShift[],
   approvals: readonly VarianceApproval[],
+  autoApproveEnabled: boolean = false,
 ): MonthlyVarianceSummary {
   const approvalByDate = new Map(
     approvals.filter(a => a.name === name).map(a => [a.date, a] as const)
@@ -193,7 +219,11 @@ export function aggregateMonthlyVariance(
     .sort((a, b) => a.date.localeCompare(b.date))
     .map(d => {
       const approval = approvalByDate.get(d.date) ?? null;
-      return { ...d, status: (approval ? "approved" : "pending") as VarianceStatus, approval };
+      let status: VarianceStatus;
+      if (approval) status = "approved";
+      else if (autoApproveEnabled && Math.abs(d.deltaMinutes) < AUTO_APPROVE_THRESHOLD_MINUTES) status = "auto-approved";
+      else status = "pending";
+      return { ...d, status, approval };
     });
 
   let scheduledMinutes = 0;
@@ -206,7 +236,7 @@ export function aggregateMonthlyVariance(
       scheduledMinutes += c.scheduledMinutes;
       clockedMinutes += c.actualMinutes;
     }
-    if (day.status === "approved") approvedMinutes += day.deltaMinutes;
+    if (day.status === "approved" || day.status === "auto-approved") approvedMinutes += day.deltaMinutes;
     else pendingMinutes += day.deltaMinutes;
   }
 

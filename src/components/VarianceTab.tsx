@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Check, AlertTriangle, GitCompare } from "lucide-react";
 import { AppData } from "../types";
-import { aggregateMonthlyVariance, DayVarianceWithStatus } from "../utils/variance";
+import { aggregateMonthlyVariance, DayVarianceWithStatus, AUTO_APPROVE_THRESHOLD_MINUTES } from "../utils/variance";
 import { approveVarianceDay, approveAllRemainingVariance } from "../utils/api";
 
 interface VarianceTabProps {
@@ -66,11 +66,13 @@ export default function VarianceTab({ appData, lang, theme, onRefresh }: Varianc
     [appData.entries, monthStart, monthEnd]
   );
 
+  const autoApproveEnabled = !!appData.config.auto_approve_variance_enabled;
+
   const summary = useMemo(
     () => selectedName
-      ? aggregateMonthlyVariance(selectedName, monthEntries, appData.scheduledShifts, appData.varianceApprovals)
+      ? aggregateMonthlyVariance(selectedName, monthEntries, appData.scheduledShifts, appData.varianceApprovals, autoApproveEnabled)
       : null,
-    [selectedName, monthEntries, appData.scheduledShifts, appData.varianceApprovals]
+    [selectedName, monthEntries, appData.scheduledShifts, appData.varianceApprovals, autoApproveEnabled]
   );
 
   const pendingDates = useMemo(
@@ -115,6 +117,11 @@ export default function VarianceTab({ appData, lang, theme, onRefresh }: Varianc
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-lg">
         <h2 className="text-sm font-bold text-slate-100 flex items-center gap-2">
           <GitCompare size={16} className="text-lime-400" /> {lang === "fr" ? "Écarts planning / pointage" : "Scheduled vs. actual variance"}
+          {autoApproveEnabled && (
+            <span className="px-2 py-0.5 rounded-full text-[9px] font-bold bg-sky-400/10 text-sky-400 border border-sky-400/30 normal-case">
+              {lang === "fr" ? `Approbation auto < ${AUTO_APPROVE_THRESHOLD_MINUTES} min activée` : `Auto-approve < ${AUTO_APPROVE_THRESHOLD_MINUTES} min is on`}
+            </span>
+          )}
         </h2>
         <div className="flex flex-wrap items-center gap-2">
           <select
@@ -213,6 +220,7 @@ export default function VarianceTab({ appData, lang, theme, onRefresh }: Varianc
             <div className="bg-slate-900 border border-slate-800 rounded-2xl divide-y divide-slate-800/60 shadow-lg overflow-hidden">
               {summary.days.map((day: DayVarianceWithStatus) => {
                 const isPending = day.status === "pending";
+                const isAutoApproved = day.status === "auto-approved";
                 const isBusy = busyDate === day.date;
                 return (
                   <div key={day.date} className="p-4 flex flex-col sm:flex-row sm:items-center gap-3">
@@ -225,8 +233,19 @@ export default function VarianceTab({ appData, lang, theme, onRefresh }: Varianc
                             {lang === "fr" ? "Non planifié" : "Unscheduled"}
                           </span>
                         )}
-                        <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold ${isPending ? "bg-amber-400/10 text-amber-400" : "bg-lime-400/10 text-lime-400"}`}>
-                          {isPending ? (lang === "fr" ? "En attente" : "Pending") : (lang === "fr" ? "Approuvé" : "Approved")}
+                        {/* Auto-approved gets its own colour (sky, not
+                            lime) — never visually indistinguishable from a
+                            genuine human "Approved", per the auto-approve
+                            feature's own design constraint (see
+                            CLAUDE.md / api layer comment on this toggle). */}
+                        <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold ${
+                          isPending ? "bg-amber-400/10 text-amber-400"
+                          : isAutoApproved ? "bg-sky-400/10 text-sky-400"
+                          : "bg-lime-400/10 text-lime-400"
+                        }`}>
+                          {isPending ? (lang === "fr" ? "En attente" : "Pending")
+                            : isAutoApproved ? (lang === "fr" ? "Approuvé auto" : "Auto-approved")
+                            : (lang === "fr" ? "Approuvé" : "Approved")}
                         </span>
                       </div>
                       {isPending ? (
@@ -239,6 +258,12 @@ export default function VarianceTab({ appData, lang, theme, onRefresh }: Varianc
                                 : (lang === "fr" ? `Prévu ${c.scheduledStart}–${c.scheduledEnd}, pointé ${c.actualStart}–${c.actualEnd}` : `Scheduled ${c.scheduledStart}–${c.scheduledEnd}, clocked ${c.actualStart}–${c.actualEnd}`)}
                             </span>
                           ))}
+                        </p>
+                      ) : isAutoApproved ? (
+                        <p className="text-[10px] text-slate-500 mt-1">
+                          {lang === "fr"
+                            ? `Sous ${AUTO_APPROVE_THRESHOLD_MINUTES} min — aucune révision manuelle enregistrée`
+                            : `Under ${AUTO_APPROVE_THRESHOLD_MINUTES} min — no manual review on record`}
                         </p>
                       ) : (
                         <p className="text-[10px] text-slate-500 mt-1">

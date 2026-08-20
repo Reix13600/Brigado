@@ -104,6 +104,14 @@ export interface GeneralConfig {
   // When true, staff can't freehand-type "worked" hours — they must use
   // the live Clock In / Clock Out buttons instead.
   strict_clock_required: boolean;
+  // When true, a variance day with no explicit approval record and
+  // |deltaMinutes| < 15 is COMPUTED as "effectively approved" wherever
+  // variance status is counted or displayed — see src/utils/variance.ts's
+  // VarianceStatus. Nothing is ever written to varianceApprovals for
+  // these; toggling this off reverts them to pending immediately, since
+  // there was never a real record to begin with. Reuses the tolerance-
+  // setting's own Settings location (Hours & tax card), per CLAUDE.md.
+  auto_approve_variance_enabled?: boolean;
   // Optional email address for the weekly Sunday-night digest. Empty
   // string means "don't send one."
   digest_email: string;

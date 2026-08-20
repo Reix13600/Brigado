@@ -4,7 +4,7 @@ import {
   isAuthorizedManager, watchAuthState,
 } from "../utils/auth";
 import {
-  AppData, HourEntry, StaffMember, CashAdvance, GeneralConfig, EntryType, RoleType, ScheduledShift, Deduction, Shift, ShiftTemplate
+  AppData, HourEntry, StaffMember, CashAdvance, GeneralConfig, EntryType, RoleType, ScheduledShift, Deduction, Shift, ShiftTemplate, TimeOffRequest
 } from "../types";
 import { getTranslation, LangType, TRANSLATIONS } from "../utils/translations";
 import { auth, getRestaurantId, functions } from "../firebase";
@@ -24,6 +24,7 @@ import { COMPLIANCE_RULES, isRuleEnabled, defaultComplianceRules, NOT_TRACKED_EN
 import { getFrenchHoliday } from "../utils/holidays";
 import { DEFAULT_TOLERANCE_MINUTES, resolveToleranceMinutes } from "../utils/effectiveHours";
 import { computePlannedWeekTotal, projectDraftShift, DraftShift } from "../utils/plannedHours";
+import { findTimeOffConflict } from "../utils/timeOffConflicts";
 import {
   saveConfig, saveStaff, saveEntry, deleteEntry, approveAllEntries,
   approveEntriesByRole, saveAdvance, deleteAdvance, saveDayNote, saveWeekNote, clearAllData,
@@ -181,6 +182,11 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
   // Clock-in/out grace window. Phase A: stored and editable here, but
   // NOT yet applied to the live payroll totals — see effectiveHours.ts.
   const [toleranceMinutes, setToleranceMinutes] = useState<number>(DEFAULT_TOLERANCE_MINUTES);
+  // Part 8: auto-approve toggle for variances under 15 min. Unlike
+  // toleranceMinutes above, this DOES apply live the moment it's saved —
+  // it's a pure display/counting rule (see variance.ts), not a payroll
+  // number, so there's no "not yet wired in" caveat needed here.
+  const [autoApproveVariance, setAutoApproveVariance] = useState<boolean>(false);
   const [taxRate, setTaxRate] = useState<number>(22);
   const [deductions, setDeductions] = useState<Deduction[]>([{ id: "tax", label: "Tax", rate: 22 }]);
   const [approvalRequired, setApprovalRequired] = useState<boolean>(true);
@@ -270,6 +276,19 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
   const [printHideAlerts, setPrintHideAlerts] = useState<boolean>(true);
   const [printHideTotals, setPrintHideTotals] = useState<boolean>(false);
 
+  // Part 6: time-off awareness. Set whenever trySaveScheduledShift()
+  // detects the target employee has APPROVED time off covering the
+  // shift's date — this is what makes the block a real two-step
+  // confirmation rather than a silent no-op: the save is HELD here
+  // instead of running, and only proceeds if the manager explicitly
+  // confirms in the modal this state renders.
+  const [timeOffOverridePrompt, setTimeOffOverridePrompt] = useState<{
+    shift: ScheduledShift;
+    conflict: TimeOffRequest;
+    onConfirmed?: () => void;
+  } | null>(null);
+  const [timeOffOverrideBusy, setTimeOffOverrideBusy] = useState<boolean>(false);
+
   // Phase D: shift-template tray
   const [templateFormOpen, setTemplateFormOpen] = useState<boolean>(false);
   const [templateLabel, setTemplateLabel] = useState<string>("");
@@ -298,6 +317,7 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
       setRestoName(appData.config.resto_name);
       setOvertimeLimit(appData.config.overtime_limit);
       setToleranceMinutes(resolveToleranceMinutes(appData.config));
+      setAutoApproveVariance(!!appData.config.auto_approve_variance_enabled);
       setTaxRate(appData.config.tax_rate);
       setDeductions(
         appData.config.deductions && appData.config.deductions.length > 0
@@ -510,6 +530,7 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
         // beyond an hour stops being a "grace window" and starts silently
         // rewriting real shifts.
         tolerance_minutes: Math.max(0, Math.min(60, Math.round(Number(toleranceMinutes) || 0))),
+        auto_approve_variance_enabled: autoApproveVariance,
         tax_rate: summedTaxRate,
         deductions: deductions,
         enable_scheduling: enableScheduling,
@@ -1446,6 +1467,48 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
     setScheduleModalOpen(true);
   };
 
+  // Part 6: the ONE place every "create/move a scheduled shift"
+  // interaction funnels through, so the approved-time-off block + its
+  // two-step override is enforced identically everywhere a shift can be
+  // saved from the grid (manual add/edit, drag-drop move, drag-drop
+  // template, duplicate) instead of being re-implemented per call site.
+  // `skipConflictCheck` is used ONLY by the override modal's own confirm
+  // handler below, once a manager has explicitly said "schedule it
+  // anyway" for THIS specific shift — every other caller always checks.
+  const trySaveScheduledShift = async (
+    shift: ScheduledShift,
+    opts?: { onSaved?: () => void; skipConflictCheck?: boolean }
+  ): Promise<void> => {
+    if (!opts?.skipConflictCheck) {
+      const conflict = findTimeOffConflict(shift.name, shift.date, appData.timeOffRequests, ["approved"]);
+      if (conflict) {
+        setTimeOffOverridePrompt({ shift, conflict, onConfirmed: opts?.onSaved });
+        return;
+      }
+    }
+    try {
+      await saveScheduledShift(shift);
+      onRefresh();
+      opts?.onSaved?.();
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleConfirmTimeOffOverride = async () => {
+    if (!timeOffOverridePrompt) return;
+    setTimeOffOverrideBusy(true);
+    try {
+      await trySaveScheduledShift(timeOffOverridePrompt.shift, {
+        skipConflictCheck: true,
+        onSaved: timeOffOverridePrompt.onConfirmed,
+      });
+    } finally {
+      setTimeOffOverrideBusy(false);
+      setTimeOffOverridePrompt(null);
+    }
+  };
+
   const handleSaveScheduleShift = async () => {
     const hours = getShiftHours({
       id: "",
@@ -1467,14 +1530,12 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
       role: scheduleForm.role
     };
 
-    try {
-      await saveScheduledShift(shift);
-      onRefresh();
-      setScheduleModalOpen(false);
-      setSelectedScheduleShift(null);
-    } catch (err) {
-      console.error(err);
-    }
+    await trySaveScheduledShift(shift, {
+      onSaved: () => {
+        setScheduleModalOpen(false);
+        setSelectedScheduleShift(null);
+      },
+    });
   };
 
   const handleSaveAsCopyScheduleShift = async () => {
@@ -1498,14 +1559,12 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
       role: scheduleForm.role
     };
 
-    try {
-      await saveScheduledShift(shift);
-      onRefresh();
-      setScheduleModalOpen(false);
-      setSelectedScheduleShift(null);
-    } catch (err) {
-      console.error(err);
-    }
+    await trySaveScheduledShift(shift, {
+      onSaved: () => {
+        setScheduleModalOpen(false);
+        setSelectedScheduleShift(null);
+      },
+    });
   };
 
   const handleDeleteScheduleShift = async (id: string) => {
@@ -1528,33 +1587,39 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
       id: `shift-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
       hours: hours
     };
-    try {
-      await saveScheduledShift(newShift);
-      onRefresh();
-    } catch (err) {
-      console.error(err);
-    }
+    await trySaveScheduledShift(newShift);
   };
 
+  // Bulk operation, so a per-shift blocking modal (as used everywhere
+  // else) doesn't fit — instead this SKIPS any shift that would land on
+  // approved time off (never silently overwrites/ignores it beyond that)
+  // and reports exactly what was skipped, so the manager isn't left
+  // guessing why the copied week has fewer shifts than the source week.
   const handleCopyPreviousWeekSchedule = async () => {
     if (!confirm(t("copyWeekPrompt"))) return;
-    
+
     const prevWeekDays = getWeekDatesOffset(scheduleOffset - 1);
     const currWeekDays = getWeekDatesOffset(scheduleOffset);
-    
+
     const allShifts = appData.scheduledShifts || [];
     const prevWeekShifts = allShifts.filter(s => prevWeekDays.includes(s.date));
-    
+
     if (prevWeekShifts.length === 0) {
       alert(lang === "fr" ? "Aucun service planifié trouvé dans la semaine précédente." : "No scheduled shifts found in the previous week.");
       return;
     }
-    
+
+    const skipped: { name: string; date: string }[] = [];
     try {
       for (const shift of prevWeekShifts) {
         const prevDayIdx = prevWeekDays.indexOf(shift.date);
         const correspondingCurrDay = currWeekDays[prevDayIdx];
-        
+
+        if (findTimeOffConflict(shift.name, correspondingCurrDay, appData.timeOffRequests, ["approved"])) {
+          skipped.push({ name: shift.name, date: correspondingCurrDay });
+          continue;
+        }
+
         const newShift: ScheduledShift = {
           id: `shift-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
           name: shift.name,
@@ -1567,7 +1632,12 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
         await saveScheduledShift(newShift);
       }
       onRefresh();
-      alert(lang === "fr" ? "Planning copié avec succès !" : "Schedule copied successfully!");
+      const copiedCount = prevWeekShifts.length - skipped.length;
+      const skippedNote = skipped.length === 0 ? "" :
+        lang === "fr"
+          ? ` ${skipped.length} ignoré(s) — congé approuvé : ${skipped.map(s => `${s.name} (${s.date})`).join(", ")}.`
+          : ` ${skipped.length} skipped — approved time off: ${skipped.map(s => `${s.name} (${s.date})`).join(", ")}.`;
+      alert((lang === "fr" ? `${copiedCount} service(s) copié(s) !` : `${copiedCount} shift(s) copied!`) + skippedNote);
     } catch (err) {
       console.error(err);
     }
@@ -1618,12 +1688,7 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
         role,
       };
 
-      try {
-        await saveScheduledShift(newShift);
-        onRefresh();
-      } catch (err) {
-        console.error(err);
-      }
+      await trySaveScheduledShift(newShift);
       return;
     }
 
@@ -1639,12 +1704,7 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
       role: targetMember ? targetMember.role : matchedShift.role
     };
 
-    try {
-      await saveScheduledShift(updatedShift);
-      onRefresh();
-    } catch (err) {
-      console.error(err);
-    }
+    await trySaveScheduledShift(updatedShift);
   };
 
   // Phase D: manage the shift-template tray. Manager-driven only — label
@@ -3295,11 +3355,27 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                               const holiday = getFrenchHoliday(day.dateStr);
                               const holidayTitle = holiday ? (lang === "fr" ? holiday.nameFr : holiday.nameEn) : "";
                               const isWeekend = [0, 6].includes(new Date(day.dateStr + "T00:00:00").getDay());
+                              // Part 6: time-off awareness. Pending = a
+                              // heads-up flag only (never blocks anything
+                              // here — that's handled at save time in
+                              // trySaveScheduledShift). Approved with an
+                              // existing shift already on it is the
+                              // REVERSE case from the spec (time off got
+                              // approved after a shift was scheduled) —
+                              // flagged directly on the shift card itself,
+                              // since that's a real conflict, not a
+                              // heads-up. Approved with no shift just tints
+                              // the empty cell so a manager sees it before
+                              // even trying to drop one there.
+                              const pendingLeave = findTimeOffConflict(member.name, day.dateStr, appData.timeOffRequests, ["pending"]);
+                              const approvedLeave = findTimeOffConflict(member.name, day.dateStr, appData.timeOffRequests, ["approved"]);
                               return (
-                                <td 
+                                <td
                                   key={day.dateStr}
                                   title={holidayTitle || undefined}
-                                  className={`p-2 border-l border-slate-850 text-center min-h-[80px] relative transition-all ${holiday ? "bg-indigo-500/[0.015]" : isWeekend ? "bg-sky-500/[0.02]" : ""}`}
+                                  className={`p-2 border-l border-slate-850 text-center min-h-[80px] relative transition-all ${
+                                    approvedLeave && cellShifts.length === 0 ? "bg-rose-500/[0.03]" : holiday ? "bg-indigo-500/[0.015]" : isWeekend ? "bg-sky-500/[0.02]" : ""
+                                  }`}
                                   onDragOver={e => e.preventDefault()}
                                   onDrop={e => handleDropShift(e, day.dateStr, member.name)}
                                   onClick={() => {
@@ -3308,6 +3384,19 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                                     }
                                   }}
                                 >
+                                  {pendingLeave && (
+                                    <span
+                                      title={lang === "fr" ? `Congé en attente : ${pendingLeave.startDate} → ${pendingLeave.endDate}` : `Time off pending: ${pendingLeave.startDate} → ${pendingLeave.endDate}`}
+                                      className="absolute top-1 right-1 text-[9px] leading-none z-10"
+                                    >
+                                      🌴
+                                    </span>
+                                  )}
+                                  {approvedLeave && cellShifts.length === 0 && (
+                                    <span className="block text-[8px] text-rose-400/80 font-bold uppercase tracking-wide mt-1">
+                                      {lang === "fr" ? "Congé" : "On leave"}
+                                    </span>
+                                  )}
                                   <div className="space-y-1.5 flex flex-col justify-center items-center min-h-[50px]">
                                     {cellShifts.map(shift => {
                                       const hours = getShiftHours(shift);
@@ -3315,9 +3404,9 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                                       const hasOverlapConflict = getOverlappingShifts(shift, shifts).length > 0;
                                       const hasComplianceWarning = warnings.length > 0 && !hasOverlapConflict;
                                       const col = RC[shift.role];
-                                      
+
                                       return (
-                                        <div 
+                                        <div
                                           key={shift.id}
                                           draggable
                                           onDragStart={e => handleDragStart(e, shift.id)}
@@ -3326,13 +3415,14 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                                             handleOpenEditShift(shift);
                                           }}
                                           className={`w-full p-2 rounded-xl text-left border relative select-none cursor-grab active:cursor-grabbing hover:shadow-md transition-all animate-scale-in group/shift ${
+                                            approvedLeave ? "ring-2 ring-rose-500/30 border-rose-500 shift-card-conflict" :
                                             hasOverlapConflict ? "ring-2 ring-rose-500/20 animate-pulse border-rose-500 shift-card-conflict" :
                                             hasComplianceWarning ? "ring-2 ring-amber-500/20 border-amber-500 shift-card-conflict" : ""
                                           }`}
                                           style={{
-                                            backgroundColor: hasOverlapConflict ? (theme === "light" ? "#fff1f2" : "#88133725") : hasComplianceWarning ? (theme === "light" ? "#fffbeb" : "#78350f25") : `${col}15`,
-                                            borderColor: hasOverlapConflict ? "#f43f5e" : hasComplianceWarning ? "#f59e0b" : `${col}35`,
-                                            color: hasOverlapConflict ? (theme === "light" ? "#e11d48" : "#f43f5e") : hasComplianceWarning ? (theme === "light" ? "#b45309" : "#fbbf24") : col
+                                            backgroundColor: approvedLeave ? (theme === "light" ? "#fff1f2" : "#88133725") : hasOverlapConflict ? (theme === "light" ? "#fff1f2" : "#88133725") : hasComplianceWarning ? (theme === "light" ? "#fffbeb" : "#78350f25") : `${col}15`,
+                                            borderColor: approvedLeave ? "#f43f5e" : hasOverlapConflict ? "#f43f5e" : hasComplianceWarning ? "#f59e0b" : `${col}35`,
+                                            color: approvedLeave ? (theme === "light" ? "#e11d48" : "#f43f5e") : hasOverlapConflict ? (theme === "light" ? "#e11d48" : "#f43f5e") : hasComplianceWarning ? (theme === "light" ? "#b45309" : "#fbbf24") : col
                                           }}
                                         >
                                           <div className="flex justify-between items-center">
@@ -3347,7 +3437,18 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                                               >
                                                 <Copy size={10} />
                                               </button>
-                                              {warnings.length > 0 && (
+                                              {approvedLeave && (
+                                                <span onClick={e => e.stopPropagation()}>
+                                                  <InfoTooltip
+                                                    text={lang === "fr"
+                                                      ? `Conflit : congé approuvé pour ${member.name} (${approvedLeave.startDate} → ${approvedLeave.endDate})`
+                                                      : `Conflict: approved time off for ${member.name} (${approvedLeave.startDate} → ${approvedLeave.endDate})`}
+                                                    preWrap
+                                                    trigger={<span className="font-extrabold cursor-pointer text-xs text-rose-400">🌴</span>}
+                                                  />
+                                                </span>
+                                              )}
+                                              {!approvedLeave && warnings.length > 0 && (
                                                 <span className={printHideAlerts ? "print:hidden" : ""} onClick={e => e.stopPropagation()}>
                                                   <InfoTooltip
                                                     text={warnings.join("\n")}
@@ -3783,6 +3884,14 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                       rangeDates.push(cursor.toISOString().slice(0, 10));
                       cursor.setDate(cursor.getDate() + 1);
                     }
+                    // Part 6: proactive heads-up at APPROVAL time (not
+                    // just on the grid, which the manager may not be
+                    // looking at right now) — any shift already scheduled
+                    // in this request's range, for this employee, that
+                    // approving would put into conflict.
+                    const conflictingShifts = (appData.scheduledShifts || [])
+                      .filter(s => s.name === r.staffName && rangeDates.includes(s.date))
+                      .sort((a, b) => a.date.localeCompare(b.date));
                     return (
                       <div key={r.id} className="bg-slate-950/40 border border-slate-800/60 rounded-xl p-3">
                         <div className="flex flex-col sm:flex-row gap-3 justify-between">
@@ -3792,6 +3901,18 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                             {r.reason && <div className="text-xs text-slate-500 italic">{r.reason}</div>}
                             {r.managerNote && (
                               <div className="text-[11px] text-amber-400 flex items-start gap-1 mt-1">📌 {r.managerNote}</div>
+                            )}
+                            {conflictingShifts.length > 0 && (
+                              <div className="text-[11px] text-rose-400 flex items-start gap-1 mt-1">
+                                <span className="flex-shrink-0">⚠️</span>
+                                <span>
+                                  {lang === "fr"
+                                    ? `${conflictingShifts.length} service(s) déjà planifié(s) dans cette période : `
+                                    : `${conflictingShifts.length} shift(s) already scheduled in this range: `}
+                                  {conflictingShifts.map(s => `${s.date} (${s.startTime}–${s.endTime})`).join(", ")}
+                                  {lang === "fr" ? " — approuver créera un conflit." : " — approving will create a conflict."}
+                                </span>
+                              </div>
                             )}
                             <div className="flex items-center gap-2 pt-2">
                               <button
@@ -4224,6 +4345,19 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                       ? "Pas encore appliqué à la paie — préparation pour une prochaine version."
                       : "Not yet applied to payroll — groundwork for an upcoming release."}
                   </span>
+                </div>
+                <div className="flex items-start justify-between gap-3 py-1">
+                  <div>
+                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">
+                      {lang === "fr" ? "Approbation automatique des écarts" : "Auto-approve variance"}
+                    </label>
+                    <span className="text-[10px] text-slate-500 block leading-relaxed">
+                      {lang === "fr"
+                        ? "Un écart de moins de 15 min sans révision manuelle est compté comme « Approuvé auto » dans l'onglet Écarts — visuellement distinct d'une approbation par un gérant, et aucune fiche d'approbation n'est jamais enregistrée pour ces jours. Désactiver révèle immédiatement les jours concernés comme en attente."
+                        : "A variance under 15 min with no manual review is counted as \"Auto-approved\" in the Variance tab — visually distinct from a manager's own approval, and no approval record is ever written for these days. Turning this off immediately reveals them as pending again."}
+                    </span>
+                  </div>
+                  <Toggle checked={autoApproveVariance} onChange={setAutoApproveVariance} />
                 </div>
                 <div>
                   <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1.5">
@@ -5077,6 +5211,50 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                   {t("cancel")}
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Part 6: two-step override for scheduling over approved time off.
+          Reachable from EVERY save path (manual add/edit, drag-drop move,
+          drag-drop template, duplicate) via trySaveScheduledShift — this
+          is the one place the actual write happens once a manager
+          confirms, so there's exactly one confirm flow to reason about. */}
+      {timeOffOverridePrompt && (
+        <div className="fixed inset-0 bg-slate-950/80 z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-rose-500/40 rounded-2xl p-5 w-full max-w-sm space-y-4">
+            <div className="flex items-start gap-3">
+              <span className="text-2xl flex-shrink-0">🌴</span>
+              <div>
+                <h3 className="text-sm font-bold text-slate-100">
+                  {lang === "fr" ? "Congé approuvé sur cette date" : "Approved time off on this date"}
+                </h3>
+                <p className="text-xs text-slate-400 mt-1 leading-relaxed">
+                  {lang === "fr"
+                    ? `${timeOffOverridePrompt.shift.name} a un congé approuvé du ${timeOffOverridePrompt.conflict.startDate} au ${timeOffOverridePrompt.conflict.endDate}, qui couvre le ${timeOffOverridePrompt.shift.date}. Planifier un service ce jour-là est inhabituel.`
+                    : `${timeOffOverridePrompt.shift.name} has approved time off from ${timeOffOverridePrompt.conflict.startDate} to ${timeOffOverridePrompt.conflict.endDate}, which covers ${timeOffOverridePrompt.shift.date}. Scheduling a shift that day is unusual.`}
+                </p>
+                {timeOffOverridePrompt.conflict.reason && (
+                  <p className="text-[11px] text-slate-500 italic mt-1.5">"{timeOffOverridePrompt.conflict.reason}"</p>
+                )}
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <button
+                className="flex-1 py-2.5 border border-slate-800 hover:border-slate-700 bg-slate-950/50 rounded-xl text-slate-300 text-xs font-semibold transition-all"
+                onClick={() => setTimeOffOverridePrompt(null)}
+                disabled={timeOffOverrideBusy}
+              >
+                {t("cancel")}
+              </button>
+              <button
+                className="flex-1 py-2.5 bg-rose-500 hover:bg-rose-400 text-white font-bold rounded-xl transition-all text-xs disabled:opacity-50"
+                onClick={handleConfirmTimeOffOverride}
+                disabled={timeOffOverrideBusy}
+              >
+                {timeOffOverrideBusy ? "..." : (lang === "fr" ? "Planifier quand même" : "Schedule anyway")}
+              </button>
             </div>
           </div>
         </div>

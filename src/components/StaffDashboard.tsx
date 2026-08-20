@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useRef } from "react";
-import { AppData, HourEntry, Shift, EntryType, CashAdvance } from "../types";
+import { AppData, HourEntry, Shift, EntryType, CashAdvance, ScheduledShift } from "../types";
 import { getFrenchHoliday } from "../utils/holidays";
 import { getRoleColor } from "../utils/roleColors";
 import { getTranslation, LangType } from "../utils/translations";
 import { saveEntry, saveDayNote, deleteEntry, clockIn, clockOut, cancelClockIn, sendMessage, requestTimeOff, requestSwap, claimSwap, cancelSwapClaim, markThreadRead } from "../utils/api";
-import { 
+import {
   User, Calendar, Clock, CheckCircle2, AlertTriangle, ShieldAlert,
-  ArrowRight, Check, X, Clipboard, ArrowLeft, RefreshCw, Eye, EyeOff, LogIn, LogOut
+  ArrowRight, Check, X, XCircle, Clipboard, ArrowLeft, RefreshCw, Eye, EyeOff, LogIn, LogOut,
+  Thermometer, Palmtree, ChevronDown, ChevronUp, ChevronLeft, ChevronRight
 } from "lucide-react";
 
 interface StaffDashboardProps {
@@ -314,7 +315,16 @@ export default function StaffDashboard({ appData, lang, setLang, onRefresh, them
   const [coverBusyId, setCoverBusyId] = useState<string | null>(null);
   const [coverReasonDraft, setCoverReasonDraft] = useState<Record<string, string>>({});
   const [showUpcomingShifts, setShowUpcomingShifts] = useState<boolean>(false);
-  const [myScheduleWeek, setMyScheduleWeek] = useState<"this" | "next">("this");
+  // Part 7: collapsed by default, same pattern (and default state) as
+  // showOlderDayPicker/showUpcomingShifts above — this file's established
+  // way of keeping a useful-but-secondary list out of the way until asked
+  // for, rather than a week/month filter control (which nothing else in
+  // this staff-facing file uses, and is fussier to operate on a phone).
+  const [showRecentSubmissions, setShowRecentSubmissions] = useState<boolean>(false);
+  // Part 3 & 4 — see their own sections further down.
+  const [myScheduleMonthOffset, setMyScheduleMonthOffset] = useState<number>(0);
+  const [myScheduleSelectedDay, setMyScheduleSelectedDay] = useState<string | null>(null);
+  const [rotaDayPopup, setRotaDayPopup] = useState<string | null>(null);
 
   const handleSendStaffMessage = async () => {
     if (!selectedStaff || !staffMessageDraft.trim()) return;
@@ -481,34 +491,90 @@ export default function StaffDashboard({ appData, lang, setLang, onRefresh, them
 
       {!submittedEntry ? (
         <div className="space-y-4 animate-fade-in">
-          {/* WELCOME */}
-          <div className="mb-6">
-            <h1 className="text-2xl font-bold text-slate-100">
-              {selectedStaff ? `Bonjour, ${selectedStaff.split(" ")[0]} 👋` : "Bonjour 👋"}
-            </h1>
-            <p className="text-xs text-slate-400 mt-1">
-              {new Date().toLocaleDateString(lang === "fr" ? "fr-FR" : "en-US", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
-            </p>
+          {/* WELCOME — once a worker is identified, the "who are you" grid
+              below disappears entirely (Part 1: shorter landing) so this
+              header + the clocked-in indicator (Part 2) are the first
+              thing seen, not a list of names to scroll past. */}
+          <div className="mb-6 flex items-start justify-between gap-3">
+            <div>
+              <h1 className="text-2xl font-bold text-slate-100">
+                {selectedStaff ? `Bonjour, ${selectedStaff.split(" ")[0]} 👋` : "Bonjour 👋"}
+              </h1>
+              <p className="text-xs text-slate-400 mt-1">
+                {new Date().toLocaleDateString(lang === "fr" ? "fr-FR" : "en-US", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
+              </p>
+            </div>
+            {selectedStaff && (
+              <button
+                className="flex-shrink-0 text-[11px] font-semibold text-slate-500 hover:text-slate-300 underline decoration-slate-700 hover:decoration-slate-500 underline-offset-2 transition-all mt-1"
+                onClick={handleReset}
+              >
+                {lang === "fr" ? "Pas vous ?" : "Not you?"}
+              </button>
+            )}
           </div>
 
-          {/* STAFF SELECT */}
-          <div className="bg-slate-900/50 border border-slate-800/80 rounded-2xl p-4">
-            <div className="text-[10px] font-bold tracking-wider text-slate-400 uppercase mb-3">{t("whoAreYou")}</div>
-            <div className="grid grid-cols-2 gap-2">
-              {staffList.map(s => {
-                const isSelected = selectedStaff === s.name;
-                return (
+          {/* CLOCKED-IN INDICATOR (Part 2) + QUICK CLOCK IN/OUT (Part 7) —
+              a compact pill, not a banner, shown the moment a worker who is
+              already clocked in opens their page, paired with a small
+              action button so clocking out never requires scrolling to the
+              full card further down. Independent of shiftType/selectedDate
+              (unlike that full card, which only appears for shiftType
+              "worked" + today) since this reads/acts on real-world state
+              (activeClockIns) directly — clocking in/out is always a
+              "right now" action, not tied to whatever date is selected in
+              the hours-logging form below. Only shown when strict clock-in
+              is actually this restaurant's mode; freehand-hours
+              restaurants have no live clock state to show. */}
+          {selectedStaff && config.strict_clock_required && (
+            <div className="flex items-center gap-2 -mt-1 flex-wrap">
+              {activeClockIn ? (
+                <>
+                  <div className="flex items-center gap-1.5 text-[11px] font-semibold text-lime-400 bg-lime-400/10 border border-lime-400/30 rounded-full px-3 py-1.5 w-fit">
+                    <span className="w-1.5 h-1.5 rounded-full bg-lime-400 animate-pulse flex-shrink-0" />
+                    {lang === "fr" ? "Pointé depuis" : "Clocked in since"}{" "}
+                    {new Date(activeClockIn.clockInAt).toLocaleTimeString(lang === "fr" ? "fr-FR" : "en-US", { hour: "2-digit", minute: "2-digit" })}
+                  </div>
+                  <button
+                    className="flex items-center gap-1 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-full text-[11px] font-semibold transition-all disabled:opacity-50"
+                    onClick={handleClockOut}
+                    disabled={clockingBusy}
+                  >
+                    <LogOut size={12} /> {lang === "fr" ? "Sortie" : "Clock out"}
+                  </button>
+                </>
+              ) : (
+                <button
+                  className="flex items-center gap-1.5 px-4 py-2 bg-lime-400 hover:bg-lime-300 text-slate-950 rounded-full text-xs font-bold transition-all disabled:opacity-50"
+                  onClick={handleClockIn}
+                  disabled={clockingBusy}
+                >
+                  <LogIn size={14} /> {lang === "fr" ? "Pointer l'entrée" : "Clock in"}
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* STAFF SELECT — hidden once someone is identified (Part 1);
+              "Pas vous ? / Not you?" above is the only way back, and it
+              runs the same handleReset() as "submit another" so re-picking
+              a different name re-triggers their PIN, same as before. */}
+          {!selectedStaff && (
+            <div className="bg-slate-900/50 border border-slate-800/80 rounded-2xl p-4">
+              <div className="text-[10px] font-bold tracking-wider text-slate-400 uppercase mb-3">{t("whoAreYou")}</div>
+              <div className="grid grid-cols-2 gap-2">
+                {staffList.map(s => (
                   <button
                     key={s.name}
-                    className={`py-3 px-4 rounded-xl border text-sm font-medium transition-all ${isSelected ? "bg-lime-400/10 border-lime-400 text-lime-400" : "bg-slate-900 border-slate-800 text-slate-300 hover:border-slate-700"}`}
+                    className="py-3 px-4 rounded-xl border text-sm font-medium transition-all bg-slate-900 border-slate-800 text-slate-300 hover:border-slate-700"
                     onClick={() => handleSelectStaff(s.name)}
                   >
                     {s.name}
                   </button>
-                );
-              })}
+                ))}
+              </div>
             </div>
-          </div>
+          )}
 
           {selectedStaff && (
             <div className="space-y-4 animate-slide-up">
@@ -533,17 +599,43 @@ export default function StaffDashboard({ appData, lang, setLang, onRefresh, them
                 )}
               </div>
 
-              {/* MY SCHEDULE — read-only "what am I working" view, distinct
-                  from the "My Weekly Rota" grid further down (that one
-                  doubles as the day-picker for logging hours and only ever
-                  shows the current week). This is deliberately just a flat
-                  list, this week / next week, so it reads at a glance
-                  before someone even thinks about submitting a timesheet. */}
+              {/* MY SCHEDULE (Part 3 rebuild) — read-only "what am I
+                  working" view, distinct from "My Weekly Rota" further
+                  down (that one doubles as the day-picker for logging
+                  hours and only ever shows the current week — deliberately
+                  untouched, see CLAUDE.md). Was a flat this-week/next-week
+                  list; a manager scheduling 1-2 months out made that
+                  unwieldy, so this is now a genuine month calendar.
+                  MOBILE-FIRST Step 0 finding: the whole staff app is
+                  globally `max-w-md` (448px) — see the outer container at
+                  the top of this file — a deliberate, pre-existing
+                  constraint (this app is designed to run on a worker's own
+                  phone, never a shared desktop). Rather than break a
+                  single section out of that cap (fragile without a live
+                  desktop browser to verify against, and inconsistent with
+                  every other card here), the "larger screens" grid renders
+                  WITHIN it: 448px still gives a 7-col month grid ~55px per
+                  column, comfortably enough for a day number + role dots —
+                  a completely standard mobile-calendar density. The real,
+                  meaningful split is `sm:` (640px viewport): virtually
+                  every phone in portrait is under that, so real workers
+                  always get the agenda list; the grid only activates on a
+                  tablet/desktop viewport, where 448px of card width is
+                  still plenty of room. Both views read the SAME
+                  `monthShifts` — one dataset, two layouts, per the brief. */}
               {config.enable_scheduling && (() => {
-                const weekDates = getWeekDates(myScheduleWeek === "next" ? 1 : 0).map(d => d.dateStr);
-                const myWeekShifts = (appData.scheduledShifts || [])
-                  .filter(s => s.name === selectedStaff && weekDates.includes(s.date))
+                const monthAnchor = new Date();
+                monthAnchor.setDate(1);
+                monthAnchor.setMonth(monthAnchor.getMonth() + myScheduleMonthOffset);
+                const monthY = monthAnchor.getFullYear();
+                const monthM = monthAnchor.getMonth();
+                const monthKey = `${monthY}-${String(monthM + 1).padStart(2, "0")}`;
+                const monthLabel = monthAnchor.toLocaleDateString(lang === "fr" ? "fr-FR" : "en-US", { month: "long", year: "numeric" });
+
+                const monthShifts = (appData.scheduledShifts || [])
+                  .filter(s => s.name === selectedStaff && s.date.startsWith(monthKey))
                   .sort((a, b) => a.date === b.date ? a.startTime.localeCompare(b.startTime) : a.date.localeCompare(b.date));
+
                 // Same filter shape as "myOwnSwapIds" below in MY SPACE —
                 // reused pattern, not a new query. Denied requests are
                 // excluded here (unlike that one) because a stale "cover
@@ -553,79 +645,179 @@ export default function StaffDashboard({ appData, lang, setLang, onRefresh, them
                   appData.swapRequests.filter(r => r.originalStaff === selectedStaff && r.status !== "denied").map(r => r.shiftId)
                 );
 
+                // Monday-first 6x7 grid (leading/trailing days from
+                // adjacent months fill the first/last week); a fully
+                // out-of-month trailing row is dropped so a 4- or 5-week
+                // month doesn't waste a whole blank row.
+                const firstOfMonth = new Date(monthY, monthM, 1);
+                const firstWeekday = firstOfMonth.getDay() || 7;
+                const gridStart = new Date(monthY, monthM, 1 - (firstWeekday - 1));
+                let gridCells = Array.from({ length: 42 }).map((_, i) => {
+                  const d = new Date(gridStart);
+                  d.setDate(gridStart.getDate() + i);
+                  const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+                  return { dateStr, dayNum: d.getDate(), inMonth: d.getMonth() === monthM, isWeekend: [0, 6].includes(d.getDay()) };
+                });
+                while (gridCells.length > 35 && !gridCells.slice(-7).some(c => c.inMonth)) gridCells = gridCells.slice(0, -7);
+
+                const dayHeaders = lang === "fr" ? ["L", "M", "M", "J", "V", "S", "D"] : ["M", "T", "W", "T", "F", "S", "S"];
+                const selectedDayShifts = myScheduleSelectedDay ? monthShifts.filter(s => s.date === myScheduleSelectedDay) : [];
+
+                const renderShiftRow = (s: ScheduledShift) => {
+                  const isToday = s.date === todayStr;
+                  const isOvernight = s.endTime <= s.startTime; // same convention as plannedHours.ts's shiftDurationHours
+                  const d = new Date(s.date + "T00:00:00");
+                  const isWeekend = [0, 6].includes(d.getDay());
+                  const dayName = d.toLocaleDateString(lang === "fr" ? "fr-FR" : "en-US", { weekday: "long" });
+                  const dateLabel = d.toLocaleDateString(lang === "fr" ? "fr-FR" : "en-US", { day: "2-digit", month: "short" });
+                  const swapPending = myActiveSwapShiftIds.has(s.id);
+                  return (
+                    <div
+                      key={s.id}
+                      className={`flex items-center justify-between rounded-xl p-3 border ${
+                        isToday ? "border-lime-400/50 bg-lime-400/5 ring-1 ring-lime-400/30" : "border-slate-800/60 bg-slate-950/40"
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: getRoleColor(s.role, theme) }} />
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className={`text-xs font-semibold capitalize ${isToday ? "text-lime-400" : isWeekend ? "text-sky-400" : "text-slate-200"}`}>
+                              {isToday ? (lang === "fr" ? "Aujourd'hui" : "Today") : dayName}
+                            </span>
+                            <span className="text-[10px] text-slate-500 font-mono">{dateLabel}</span>
+                            {swapPending && (
+                              <span className="px-1.5 py-0.5 rounded-full text-[8px] font-bold bg-amber-400/10 text-amber-400 border border-amber-400/30">
+                                {lang === "fr" ? "Couverture demandée" : "Cover requested"}
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[10px] text-slate-500 uppercase font-semibold mt-0.5">
+                            {t(`role${s.role.charAt(0).toUpperCase() + s.role.slice(1)}`)}
+                          </div>
+                        </div>
+                      </div>
+                      <span className="font-mono text-xs font-bold text-slate-300 flex-shrink-0 whitespace-nowrap">
+                        {s.startTime}–{s.endTime}
+                        {isOvernight && <span className="text-amber-400 ml-1" title={lang === "fr" ? "Se termine le lendemain" : "Ends the next day"}>+1</span>}
+                      </span>
+                    </div>
+                  );
+                };
+
                 return (
                   <div className="bg-slate-900/50 border border-slate-800/80 rounded-2xl overflow-hidden">
                     <div className="flex items-center justify-between p-4 pb-3">
                       <span className="text-[10px] font-bold tracking-wider text-slate-400 uppercase flex items-center gap-1.5">
                         <Calendar size={12} className="text-lime-400" /> {lang === "fr" ? "Mon planning" : "My Schedule"}
                       </span>
-                      <div className="flex bg-slate-950 border border-slate-800 rounded-lg p-0.5 text-[10px]">
-                        <button
-                          className={`px-2.5 py-1 rounded-md font-bold transition-all ${myScheduleWeek === "this" ? "bg-lime-400 text-slate-950" : "text-slate-400 hover:text-slate-200"}`}
-                          onClick={() => setMyScheduleWeek("this")}
-                        >
-                          {lang === "fr" ? "Cette semaine" : "This week"}
-                        </button>
-                        <button
-                          className={`px-2.5 py-1 rounded-md font-bold transition-all ${myScheduleWeek === "next" ? "bg-lime-400 text-slate-950" : "text-slate-400 hover:text-slate-200"}`}
-                          onClick={() => setMyScheduleWeek("next")}
-                        >
-                          {lang === "fr" ? "Sem. prochaine" : "Next week"}
-                        </button>
+                      <div className="flex items-center gap-1.5">
+                        {myScheduleMonthOffset !== 0 && (
+                          <button
+                            className="text-[9px] font-bold text-lime-400/80 hover:text-lime-400 uppercase transition-all"
+                            onClick={() => { setMyScheduleMonthOffset(0); setMyScheduleSelectedDay(null); }}
+                          >
+                            {lang === "fr" ? "Aujourd'hui" : "Today"}
+                          </button>
+                        )}
+                        <div className="flex items-center gap-0.5 bg-slate-950 border border-slate-800 rounded-lg p-0.5">
+                          <button
+                            className="p-1 rounded text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-all"
+                            onClick={() => { setMyScheduleMonthOffset(o => o - 1); setMyScheduleSelectedDay(null); }}
+                            aria-label={lang === "fr" ? "Mois précédent" : "Previous month"}
+                          >
+                            <ChevronLeft size={13} />
+                          </button>
+                          <span className="text-[10px] font-bold text-slate-300 capitalize font-mono px-1 w-[92px] text-center">{monthLabel}</span>
+                          <button
+                            className="p-1 rounded text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-all"
+                            onClick={() => { setMyScheduleMonthOffset(o => o + 1); setMyScheduleSelectedDay(null); }}
+                            aria-label={lang === "fr" ? "Mois suivant" : "Next month"}
+                          >
+                            <ChevronRight size={13} />
+                          </button>
+                        </div>
                       </div>
                     </div>
 
-                    {myWeekShifts.length === 0 ? (
-                      <p className="text-xs text-slate-500 italic px-4 pb-4">
-                        {lang === "fr" ? "Pas encore de service prévu." : "No shifts scheduled yet."}
-                      </p>
-                    ) : (
-                      <div className="px-4 pb-4 space-y-1.5">
-                        {myWeekShifts.map(s => {
-                          const isToday = s.date === todayStr;
-                          const isOvernight = s.endTime <= s.startTime; // same convention as plannedHours.ts's shiftDurationHours
-                          const d = new Date(s.date + "T00:00:00");
-                          const isWeekend = [0, 6].includes(d.getDay());
-                          const dayName = d.toLocaleDateString(lang === "fr" ? "fr-FR" : "en-US", { weekday: "long" });
-                          const dateLabel = d.toLocaleDateString(lang === "fr" ? "fr-FR" : "en-US", { day: "2-digit", month: "short" });
-                          const swapPending = myActiveSwapShiftIds.has(s.id);
+                    {/* GRID VIEW — sm (≥640px viewport) and up. */}
+                    <div className="hidden sm:block px-4 pb-4">
+                      <div className="grid grid-cols-7 gap-1 text-center mb-1">
+                        {dayHeaders.map((h, i) => (
+                          <span key={i} className="text-[9px] font-bold text-slate-600 uppercase">{h}</span>
+                        ))}
+                      </div>
+                      <div className="grid grid-cols-7 gap-1">
+                        {gridCells.map(cell => {
+                          const cellShifts = monthShifts.filter(s => s.date === cell.dateStr);
+                          const holiday = getFrenchHoliday(cell.dateStr);
+                          const isToday = cell.dateStr === todayStr;
+                          const isSelected = cell.dateStr === myScheduleSelectedDay;
                           return (
-                            <div
-                              key={s.id}
-                              className={`flex items-center justify-between rounded-xl p-3 border ${
-                                isToday
-                                  ? "border-lime-400/50 bg-lime-400/5 ring-1 ring-lime-400/30"
-                                  : "border-slate-800/60 bg-slate-950/40"
+                            <button
+                              key={cell.dateStr}
+                              disabled={!cell.inMonth}
+                              onClick={() => cell.inMonth && setMyScheduleSelectedDay(isSelected ? null : cell.dateStr)}
+                              className={`aspect-square rounded-lg border flex flex-col items-center justify-center gap-0.5 transition-all ${
+                                !cell.inMonth ? "opacity-20 pointer-events-none border-transparent" : "cursor-pointer"
+                              } ${
+                                isSelected
+                                  ? "border-lime-400 bg-lime-400/10 ring-1 ring-lime-400/40"
+                                  : isToday
+                                    ? "border-lime-400/40 bg-lime-400/5"
+                                    : holiday
+                                      ? "border-indigo-500/30 bg-indigo-500/5"
+                                      : cell.isWeekend
+                                        ? "border-sky-500/20 bg-sky-500/[0.03]"
+                                        : "border-slate-800/50 bg-slate-950/20 hover:border-slate-700"
                               }`}
                             >
-                              <div className="flex items-center gap-2.5 min-w-0">
-                                <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: getRoleColor(s.role, theme) }} />
-                                <div className="min-w-0">
-                                  <div className="flex items-center gap-1.5 flex-wrap">
-                                    <span className={`text-xs font-semibold capitalize ${isToday ? "text-lime-400" : isWeekend ? "text-sky-400" : "text-slate-200"}`}>
-                                      {isToday ? (lang === "fr" ? "Aujourd'hui" : "Today") : dayName}
-                                    </span>
-                                    <span className="text-[10px] text-slate-500 font-mono">{dateLabel}</span>
-                                    {swapPending && (
-                                      <span className="px-1.5 py-0.5 rounded-full text-[8px] font-bold bg-amber-400/10 text-amber-400 border border-amber-400/30">
-                                        {lang === "fr" ? "Couverture demandée" : "Cover requested"}
-                                      </span>
-                                    )}
-                                  </div>
-                                  <div className="text-[10px] text-slate-500 uppercase font-semibold mt-0.5">
-                                    {t(`role${s.role.charAt(0).toUpperCase() + s.role.slice(1)}`)}
-                                  </div>
-                                </div>
-                              </div>
-                              <span className="font-mono text-xs font-bold text-slate-300 flex-shrink-0 whitespace-nowrap">
-                                {s.startTime}–{s.endTime}
-                                {isOvernight && <span className="text-amber-400 ml-1" title={lang === "fr" ? "Se termine le lendemain" : "Ends the next day"}>+1</span>}
+                              <span className={`text-[10px] font-bold ${isSelected || isToday ? "text-lime-400" : holiday ? "text-indigo-400" : cell.isWeekend ? "text-sky-400" : "text-slate-400"}`}>
+                                {cell.dayNum}
                               </span>
-                            </div>
+                              {cellShifts.length > 0 && (
+                                <div className="flex gap-0.5">
+                                  {cellShifts.slice(0, 3).map(s => (
+                                    <span key={s.id} className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: getRoleColor(s.role, theme) }} />
+                                  ))}
+                                </div>
+                              )}
+                            </button>
                           );
                         })}
                       </div>
-                    )}
+
+                      {/* DAY DETAIL — tap a day above to reveal it here,
+                          same "tap for detail" idea as Part 4's Weekly Rota
+                          popup, just inline instead of a modal since the
+                          grid already has room below it. */}
+                      {myScheduleSelectedDay && (
+                        <div className="mt-3 space-y-1.5 animate-slide-down">
+                          {selectedDayShifts.length === 0 ? (
+                            <p className="text-xs text-slate-500 italic px-1">
+                              {lang === "fr" ? "Pas de service ce jour-là." : "No shift that day."}
+                            </p>
+                          ) : selectedDayShifts.map(s => renderShiftRow(s))}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* AGENDA VIEW — below sm: the realistic case for
+                        almost every worker, on their own phone. Same
+                        monthShifts, chronological — no tap-to-reveal step
+                        needed, everything scheduled this month just reads
+                        top to bottom. */}
+                    <div className="sm:hidden px-4 pb-4">
+                      {monthShifts.length === 0 ? (
+                        <p className="text-xs text-slate-500 italic">
+                          {lang === "fr" ? "Pas encore de service prévu ce mois-ci." : "No shifts scheduled yet this month."}
+                        </p>
+                      ) : (
+                        <div className="space-y-1.5">
+                          {monthShifts.map(s => renderShiftRow(s))}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 );
               })()}
@@ -872,7 +1064,15 @@ export default function StaffDashboard({ appData, lang, setLang, onRefresh, them
                           key={day.dateStr}
                           title={holidayTitle || undefined}
                           disabled={!isPast}
-                          onClick={() => isPast && setSelectedDate(day.dateStr)}
+                          onClick={() => {
+                            if (!isPast) return;
+                            setSelectedDate(day.dateStr);
+                            // Part 4: opens the hours-worked-that-day +
+                            // running-total popup. Selecting the day for
+                            // logging (above) is unchanged — this is
+                            // additive, not a replacement interaction.
+                            setRotaDayPopup(day.dateStr);
+                          }}
                           className={`p-1 rounded-lg border flex flex-col items-center justify-between min-h-[64px] transition-all ${!isPast ? "cursor-default" : "cursor-pointer hover:border-slate-600"} ${
                             isSelected
                               ? "border-lime-400 bg-lime-400/10 ring-1 ring-lime-400/40"
@@ -1002,28 +1202,28 @@ export default function StaffDashboard({ appData, lang, setLang, onRefresh, them
                     className={`py-3 px-2 rounded-xl border text-xs font-semibold flex flex-col items-center gap-1 transition-all ${shiftType === "worked" ? "bg-lime-400/10 border-lime-400 text-lime-400" : "bg-slate-900 border-slate-800 text-slate-300 hover:border-slate-700"}`}
                     onClick={() => setShiftType("worked")}
                   >
-                    <span className="text-lg">✅</span>
+                    <CheckCircle2 size={20} strokeWidth={2} />
                     {t("worked")}
                   </button>
                   <button
                     className={`py-3 px-2 rounded-xl border text-xs font-semibold flex flex-col items-center gap-1 transition-all ${shiftType === "absent" ? "bg-rose-400/10 border-rose-400 text-rose-400" : "bg-slate-900 border-slate-800 text-slate-300 hover:border-slate-700"}`}
                     onClick={() => setShiftType("absent")}
                   >
-                    <span className="text-lg">🚫</span>
+                    <XCircle size={20} strokeWidth={2} />
                     {t("absent")}
                   </button>
                   <button
                     className={`py-3 px-2 rounded-xl border text-xs font-semibold flex flex-col items-center gap-1 transition-all ${shiftType === "sick" ? "bg-orange-400/10 border-orange-400 text-orange-400" : "bg-slate-900 border-slate-800 text-slate-300 hover:border-slate-700"}`}
                     onClick={() => setShiftType("sick")}
                   >
-                    <span className="text-lg">🤒</span>
+                    <Thermometer size={20} strokeWidth={2} />
                     {t("sickDay")}
                   </button>
                   <button
                     className={`py-3 px-2 rounded-xl border text-xs font-semibold flex flex-col items-center gap-1 transition-all ${shiftType === "holiday" ? "bg-sky-400/10 border-sky-400 text-sky-400" : "bg-slate-900 border-slate-800 text-slate-300 hover:border-slate-700"}`}
                     onClick={() => setShiftType("holiday")}
                   >
-                    <span className="text-lg">🏖️</span>
+                    <Palmtree size={20} strokeWidth={2} />
                     {t("holiday")}
                   </button>
                 </div>
@@ -1288,7 +1488,14 @@ export default function StaffDashboard({ appData, lang, setLang, onRefresh, them
               )}
               {recentSubmissions.length > 0 && (
                 <div className="bg-slate-900/40 border border-slate-800/50 rounded-2xl p-4 space-y-3">
-                  <div className="text-[10px] font-bold tracking-wider text-slate-500 uppercase">{t("yourRecentSubmissions")}</div>
+                  <button
+                    className="w-full flex items-center justify-between text-[10px] font-bold tracking-wider text-slate-500 hover:text-slate-300 uppercase transition-all"
+                    onClick={() => setShowRecentSubmissions(v => !v)}
+                  >
+                    <span>{t("yourRecentSubmissions")} ({recentSubmissions.length})</span>
+                    {showRecentSubmissions ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                  </button>
+                  {showRecentSubmissions && (
                   <div className="space-y-2">
                     {recentSubmissions.map(e => {
                       const hourStr = e.type === "worked" ? `${Math.floor(e.hours)}h${Math.round((e.hours % 1) * 60) > 0 ? ` ${Math.round((e.hours % 1) * 60)}m` : ""}` : e.type;
@@ -1320,6 +1527,7 @@ export default function StaffDashboard({ appData, lang, setLang, onRefresh, them
                       );
                     })}
                   </div>
+                  )}
                 </div>
               )}
 
@@ -1492,6 +1700,73 @@ export default function StaffDashboard({ appData, lang, setLang, onRefresh, them
           </div>
         </div>
       )}
+
+      {/* ROTA DAY POPUP (Part 4) — tapping a day in "My Weekly Rota" opens
+          this instead of relying on the small inline grid cell to convey
+          both a worked-hours figure AND a running total, which doesn't fit
+          legibly in a 64px-tall tile. Purely a readout: reuses the same
+          "not pending" filter getWeekHours() already uses so the numbers
+          shown here always agree with the week-progress bar at the top. */}
+      {rotaDayPopup && selectedStaff && (() => {
+        const popupDate = rotaDayPopup;
+        const dayHours = appData.entries
+          .filter(e => e.name === selectedStaff && e.date === popupDate && e.type === "worked" && e.status !== "pending")
+          .reduce((sum, e) => sum + e.hours, 0);
+        const weekDates = getWeekDates().map(d => d.dateStr);
+        const uptoIdx = weekDates.indexOf(popupDate);
+        const runningTotal = uptoIdx === -1 ? dayHours : appData.entries
+          .filter(e => e.name === selectedStaff && e.type === "worked" && e.status !== "pending" && weekDates.slice(0, uptoIdx + 1).includes(e.date))
+          .reduce((sum, e) => sum + e.hours, 0);
+        const dayShift = (appData.scheduledShifts || []).find(s => s.name === selectedStaff && s.date === popupDate);
+        const dLabel = new Date(popupDate + "T00:00:00").toLocaleDateString(lang === "fr" ? "fr-FR" : "en-US", { weekday: "long", day: "numeric", month: "long" });
+        const isToday = popupDate === todayStr;
+
+        return (
+          <div className="fixed inset-0 bg-slate-950/80 z-50 flex items-center justify-center p-4" onClick={() => setRotaDayPopup(null)}>
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 w-full max-w-xs space-y-4" onClick={e => e.stopPropagation()}>
+              <div>
+                <h3 className="text-sm font-bold text-slate-100 capitalize">
+                  {isToday ? (lang === "fr" ? "Aujourd'hui" : "Today") : dLabel}
+                </h3>
+                {!isToday && <p className="text-[11px] text-slate-500 capitalize">{dLabel}</p>}
+              </div>
+
+              {dayShift && (
+                <div className="text-[11px] text-slate-400 font-mono bg-slate-950/50 rounded-lg px-3 py-2">
+                  {lang === "fr" ? "Prévu" : "Scheduled"}: {dayShift.startTime}–{dayShift.endTime}
+                </div>
+              )}
+
+              <div className="grid grid-cols-2 gap-3">
+                <div className="bg-slate-950/50 border border-slate-800/60 rounded-xl p-3">
+                  <div className="text-[9px] font-bold tracking-wider text-slate-500 uppercase">
+                    {lang === "fr" ? "Ce jour-là" : "That day"}
+                  </div>
+                  <div className="text-xl font-mono font-bold text-lime-400 mt-1">{dayHours.toFixed(1)}h</div>
+                </div>
+                <div className="bg-slate-950/50 border border-slate-800/60 rounded-xl p-3">
+                  <div className="text-[9px] font-bold tracking-wider text-slate-500 uppercase">
+                    {lang === "fr" ? "Total cumulé" : "Running total"}
+                  </div>
+                  <div className="text-xl font-mono font-bold text-slate-100 mt-1">{runningTotal.toFixed(1)}h</div>
+                </div>
+              </div>
+              {dayHours === 0 && (
+                <p className="text-[11px] text-slate-500 italic">
+                  {lang === "fr" ? "Aucune heure enregistrée pour ce jour." : "No hours logged for this day."}
+                </p>
+              )}
+
+              <button
+                className="w-full py-2.5 border border-slate-800 hover:border-slate-700 bg-slate-950/50 rounded-xl text-slate-300 text-xs font-semibold transition-all"
+                onClick={() => setRotaDayPopup(null)}
+              >
+                {lang === "fr" ? "Fermer" : "Close"}
+              </button>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

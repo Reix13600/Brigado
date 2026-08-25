@@ -18,6 +18,13 @@ import RegisterPage from "./components/RegisterPage";
 import WelcomePage from "./components/WelcomePage";
 import { db, getSlugFromUrl, setRestaurantId } from "./firebase";
 import logoFull from "./assets/logo-full.png";
+// The original mark is a white outline + lime icon, drawn for a dark
+// background — on the light theme's white page the outline is nearly
+// invisible. This is a real recolor (dark navy outline, same lime icon),
+// not a CSS filter: a filter that darkens white would also shift the
+// lime toward magenta, since invert() has no concept of "leave this hue
+// alone".
+import logoFullLight from "./assets/logo-full-light.png";
 import { Clock, Users, Sun, Moon } from "lucide-react";
 
 // Minimum gap between lastActiveAt writes for one tenant. 30 minutes is
@@ -200,7 +207,7 @@ export default function App() {
   if (loading && !appData) {
     return (
       <div className={`min-h-screen flex flex-col items-center justify-center p-4 ${theme === "light" ? "theme-light bg-slate-50 text-slate-900" : "bg-slate-950 text-slate-100"}`}>
-        <img src={logoFull} alt="Brigado" className="h-8 w-auto mb-6" />
+        <img src={theme === "light" ? logoFullLight : logoFull} alt="Brigado" className="h-8 w-auto mb-6" />
         <div className="w-12 h-12 rounded-full border-4 border-lime-400 border-t-transparent animate-spin mb-4" />
         <p className="text-sm text-slate-400">Loading staff hours application...</p>
       </div>
@@ -287,7 +294,7 @@ export default function App() {
       <div className="bg-slate-900 border-b border-slate-800/60 sticky top-0 z-40 select-none print:hidden">
         <div className="max-w-4xl mx-auto flex items-center justify-between px-4 h-12 text-xs">
           <div className="flex items-center gap-1 font-bold text-lime-400">
-            <img src={logoFull} alt="Brigado" className="h-6 w-auto" />
+            <img src={theme === "light" ? logoFullLight : logoFull} alt="Brigado" className="h-6 w-auto" />
           </div>
           
           <div className="flex items-center gap-3">

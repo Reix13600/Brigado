@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   signInManagerWithEmail, signInManagerWithGoogle, signOutManager,
   isAuthorizedManager, watchAuthState,
@@ -25,6 +25,7 @@ import { getFrenchHoliday } from "../utils/holidays";
 import { DEFAULT_TOLERANCE_MINUTES, resolveToleranceMinutes } from "../utils/effectiveHours";
 import { computePlannedWeekTotal, projectDraftShift, DraftShift } from "../utils/plannedHours";
 import { findTimeOffConflict } from "../utils/timeOffConflicts";
+import { parseStaffCsv, toStaffMembers, StaffCsvResult } from "../utils/staffCsv";
 import {
   saveConfig, saveStaff, saveEntry, deleteEntry, approveAllEntries,
   approveEntriesByRole, saveAdvance, deleteAdvance, saveDayNote, saveWeekNote, clearAllData,
@@ -150,12 +151,34 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
 
   // Restore a manager session automatically on reload (Firebase Auth
   // persists sign-in across page loads by default).
+  //
+  // ⚠️ The onRefresh() below is load-bearing, not a tidy-up. App.tsx runs
+  // fetchAppData() once per [refreshTrigger, restaurantSlug] — it does NOT
+  // depend on auth state. On a fresh page load the only session that
+  // exists is the ANONYMOUS one, so the manager-only subcollections
+  // (shiftTemplates, varianceApprovals) hit their documented
+  // permission-denied → [] guard and come back EMPTY. Signing in after
+  // that never re-fetched them, so a just-logged-in manager saw an empty
+  // shift-template tray and — worse — every already-approved variance day
+  // rendered as "pending", inviting a duplicate approval. Refreshing once
+  // on the transition INTO an authorized manager session is what makes
+  // those reads actually happen under a session that can pass
+  // isManagerOf(). Guarded by a ref so the periodic token refreshes that
+  // also fire watchAuthState don't each trigger a refetch; this effect has
+  // an empty dep array, so onRefresh() can't feed back into it.
+  const didRefetchForManager = useRef(false);
   useEffect(() => {
     const unsubscribe = watchAuthState(async (user) => {
       if (user && !user.isAnonymous) {
-        setIsAuthenticated(await isAuthorizedManager(user.uid));
+        const authorized = await isAuthorizedManager(user.uid);
+        setIsAuthenticated(authorized);
+        if (authorized && !didRefetchForManager.current) {
+          didRefetchForManager.current = true;
+          onRefresh();
+        }
       } else {
         setIsAuthenticated(false);
+        didRefetchForManager.current = false;
       }
       setAuthChecking(false);
     });
@@ -275,6 +298,13 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
   const [scheduleModalOpen, setScheduleModalOpen] = useState<boolean>(false);
   const [printHideAlerts, setPrintHideAlerts] = useState<boolean>(true);
   const [printHideTotals, setPrintHideTotals] = useState<boolean>(false);
+
+  // Part A: CSV staff import + PIN reminder dismissals (session-scoped —
+  // see the note on isPinReminderVisible for why these aren't persisted).
+  const [csvPreview, setCsvPreview] = useState<StaffCsvResult | null>(null);
+  const [csvFileName, setCsvFileName] = useState<string>("");
+  const [csvImporting, setCsvImporting] = useState<boolean>(false);
+  const [dismissedPinReminders, setDismissedPinReminders] = useState<string[]>([]);
 
   // Part 6: time-off awareness. Set whenever trySaveScheduledShift()
   // detects the target employee has APPROVED time off covering the
@@ -510,6 +540,11 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
   const pendingEntries = appData.entries.filter(e => e.status === "pending" || e.status === "correction");
   const pendingTimeOff = appData.timeOffRequests.filter(r => r.status === "pending");
   const claimedSwaps = appData.swapRequests.filter(r => r.status === "claimed");
+  // Open = a staff member asked for cover but nobody has claimed it yet.
+  // No manager action is possible on these, so they stay out of the tab
+  // badge — but they ARE rendered on the Requests tab, so the empty
+  // state has to know about them (see that ternary).
+  const openSwaps = appData.swapRequests.filter(r => r.status === "open");
   const requestsBadgeCount = pendingTimeOff.length + claimedSwaps.length;
   // Real read state (readAt) — "who sent the last message" never cleared
   // for a message the manager read but didn't reply to. See
@@ -890,6 +925,63 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
       setDeletingFormerStaff(false);
     }
   };
+
+  // ── PART A STEP 1: CSV staff import ─────────────────────────────────
+  const triggerImportStaffCsv = async () => {
+    if (!csvPreview || csvPreview.rows.length === 0) return;
+    setCsvImporting(true);
+    try {
+      // Same shape and same saveStaff() call the "+ Add employee" modal
+      // uses — imported people are ordinary staff records, distinguishable
+      // only by having no PIN yet (which the reminder below surfaces).
+      const imported = toStaffMembers(csvPreview.rows, 12);
+      await saveStaff([...appData.staff, ...imported]);
+      onRefresh();
+      setCsvPreview(null);
+      setCsvFileName("");
+      alert(
+        lang === "fr"
+          ? `${imported.length} employé(s) importé(s). Aucun code PIN n'est défini — pensez à en attribuer un à chacun.`
+          : `${imported.length} staff member(s) imported. No PIN is set — remember to assign one to each.`
+      );
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setCsvImporting(false);
+    }
+  };
+
+  const handleCsvFile = async (file: File | null) => {
+    if (!file) return;
+    setCsvFileName(file.name);
+    try {
+      const text = await file.text();
+      setCsvPreview(parseStaffCsv(text, appData.staff.map(s => s.name)));
+    } catch (err) {
+      console.error(err);
+      setCsvPreview({ rows: [], errors: [{ line: 0, raw: "", reason: "Could not read this file" }] });
+    }
+  };
+
+  // ── PART A STEP 2: "no PIN set" reminder ────────────────────────────
+  // Derived live from the staff array on every render — never a stored
+  // flag — so a member whose PIN is later CLEARED surfaces again by
+  // itself. Dismissals live in component state (session-scoped: they
+  // vanish on reload, which is deliberate — a reminder that stayed buried
+  // forever would defeat the point, and a PIN-less account is a standing
+  // condition, not a one-off notification). A member is also removed from
+  // the dismissed set the moment they actually GAIN a pin, so the
+  // dismissal can never mask a *later, different* occurrence.
+  const staffMissingPin = appData.staff.filter(s => s.active !== false && !(s.pin || "").trim());
+  const isPinReminderVisible = (name: string) =>
+    staffMissingPin.some(s => s.name === name) && !dismissedPinReminders.includes(name);
+
+  useEffect(() => {
+    // Drop dismissals for anyone who now HAS a pin, so losing it later
+    // re-surfaces the reminder even within the same session.
+    setDismissedPinReminders(prev => prev.filter(n => staffMissingPin.some(s => s.name === n)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appData.staff]);
 
   const triggerSaveStaffMemberFields = async (name: string, fields: Partial<StaffMember>) => {
     const updatedStaff = appData.staff.map(s => {
@@ -2246,9 +2338,13 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                   key={r}
                   className={`px-4 py-2 rounded-xl text-xs font-semibold border transition-all`}
                   style={{
-                    backgroundColor: active ? `${col}15` : "rgba(15,23,42,0.6)",
-                    borderColor: active ? col : "rgba(30,41,59,0.8)",
-                    color: active ? col : "#94a3b8"
+                    // Inactive colours must be theme-aware: these are inline
+                    // styles, so no .theme-light stylesheet rule can reach
+                    // them — hardcoding the dark slate left this whole filter
+                    // row looking dark-mode on the light theme.
+                    backgroundColor: active ? `${col}15` : theme === "light" ? "#ffffff" : "rgba(15,23,42,0.6)",
+                    borderColor: active ? col : theme === "light" ? "#cbd5e1" : "rgba(30,41,59,0.8)",
+                    color: active ? col : theme === "light" ? "#475569" : "#94a3b8"
                   }}
                   onClick={() => setActiveRoleFilter(r)}
                 >
@@ -2488,9 +2584,10 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                   key={r}
                   className={`px-3 py-1.5 rounded-xl text-xs font-medium border transition-all`}
                   style={{
-                    backgroundColor: activeRoleFilter === r ? `${RC[r]}10` : "rgba(2,6,23,0.4)",
-                    borderColor: activeRoleFilter === r ? RC[r] : "rgba(30,41,59,0.8)",
-                    color: activeRoleFilter === r ? RC[r] : "#94a3b8"
+                    // Same theme-aware treatment as the Overview filter above.
+                    backgroundColor: activeRoleFilter === r ? `${RC[r]}10` : theme === "light" ? "#ffffff" : "rgba(2,6,23,0.4)",
+                    borderColor: activeRoleFilter === r ? RC[r] : theme === "light" ? "#cbd5e1" : "rgba(30,41,59,0.8)",
+                    color: activeRoleFilter === r ? RC[r] : theme === "light" ? "#475569" : "#94a3b8"
                   }}
                   onClick={() => { setActiveRoleFilter(r); onRefresh(); }}
                 >
@@ -3865,7 +3962,11 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
             </h2>
           </div>
 
-          {pendingTimeOff.length === 0 && claimedSwaps.length === 0 ? (
+          {/* The empty check MUST include open (unclaimed) swaps: that
+              section renders OUTSIDE this ternary, so without them here
+              the page could show "no pending requests" directly above a
+              list of actual open requests — which is what it used to do. */}
+          {pendingTimeOff.length === 0 && claimedSwaps.length === 0 && openSwaps.length === 0 ? (
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8 text-center text-sm text-slate-500">
               {lang === "fr" ? "Aucune demande en attente." : "No pending requests."}
             </div>
@@ -3915,21 +4016,31 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                               </div>
                             )}
                             <div className="flex items-center gap-2 pt-2">
+                              {/* Visible labels, not icon-only: a title=
+                                  tooltip never appears on a touch device,
+                                  and these decisions move someone's real
+                                  time off. */}
                               <button
-                                className="p-2 bg-lime-400/10 text-lime-400 hover:bg-lime-400/20 rounded-lg disabled:opacity-40"
+                                className="px-3 py-2 bg-lime-400/10 text-lime-400 hover:bg-lime-400/20 rounded-lg disabled:opacity-40 text-xs font-semibold flex items-center gap-1.5"
                                 onClick={() => triggerDecideTimeOff(r.id, true)}
                                 disabled={requestsBusy === r.id}
-                                title={lang === "fr" ? "Approuver" : "Approve"}
                               >
-                                <Check size={16} />
+                                <Check size={14} /> {lang === "fr" ? "Approuver" : "Approve"}
                               </button>
                               <button
-                                className="p-2 bg-rose-400/10 text-rose-400 hover:bg-rose-400/20 rounded-lg disabled:opacity-40"
-                                onClick={() => triggerDecideTimeOff(r.id, false)}
+                                className="px-3 py-2 bg-rose-400/10 text-rose-400 hover:bg-rose-400/20 rounded-lg disabled:opacity-40 text-xs font-semibold flex items-center gap-1.5"
+                                onClick={() => {
+                                  // Denying is the destructive direction and
+                                  // has no undo in the UI — confirm first,
+                                  // matching deleteShiftPrompt/copyWeekPrompt.
+                                  const msg = lang === "fr"
+                                    ? `Refuser la demande de congé de ${r.staffName} (${r.startDate} → ${r.endDate}) ?`
+                                    : `Deny ${r.staffName}'s time off request (${r.startDate} → ${r.endDate})?`;
+                                  if (confirm(msg)) triggerDecideTimeOff(r.id, false);
+                                }}
                                 disabled={requestsBusy === r.id}
-                                title={lang === "fr" ? "Refuser" : "Deny"}
                               >
-                                <X size={16} />
+                                <X size={14} /> {lang === "fr" ? "Refuser" : "Deny"}
                               </button>
                               <button
                                 className="text-[10px] text-slate-500 hover:text-amber-400 transition-all"
@@ -3986,20 +4097,23 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                           )}
                           <div className="flex items-center gap-2 pt-2">
                             <button
-                              className="p-2 bg-lime-400/10 text-lime-400 hover:bg-lime-400/20 rounded-lg disabled:opacity-40"
+                              className="px-3 py-2 bg-lime-400/10 text-lime-400 hover:bg-lime-400/20 rounded-lg disabled:opacity-40 text-xs font-semibold flex items-center gap-1.5"
                               onClick={() => triggerDecideSwap(r.id, true)}
                               disabled={requestsBusy === r.id}
-                              title={lang === "fr" ? "Approuver" : "Approve"}
                             >
-                              <Check size={16} />
+                              <Check size={14} /> {lang === "fr" ? "Approuver" : "Approve"}
                             </button>
                             <button
-                              className="p-2 bg-rose-400/10 text-rose-400 hover:bg-rose-400/20 rounded-lg disabled:opacity-40"
-                              onClick={() => triggerDecideSwap(r.id, false)}
+                              className="px-3 py-2 bg-rose-400/10 text-rose-400 hover:bg-rose-400/20 rounded-lg disabled:opacity-40 text-xs font-semibold flex items-center gap-1.5"
+                              onClick={() => {
+                                const msg = lang === "fr"
+                                  ? `Refuser cet échange de service (${r.originalStaff} → ${r.claimedBy}, ${r.date}) ?`
+                                  : `Deny this cover swap (${r.originalStaff} → ${r.claimedBy}, ${r.date})?`;
+                                if (confirm(msg)) triggerDecideSwap(r.id, false);
+                              }}
                               disabled={requestsBusy === r.id}
-                              title={lang === "fr" ? "Refuser" : "Deny"}
                             >
-                              <X size={16} />
+                              <X size={14} /> {lang === "fr" ? "Refuser" : "Deny"}
                             </button>
                             <button
                               className="text-[10px] text-slate-500 hover:text-amber-400 transition-all"
@@ -4033,12 +4147,12 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
           )}
 
           {/* Open (unclaimed) cover requests — informational, no action needed yet */}
-          {appData.swapRequests.filter(r => r.status === "open").length > 0 && (
+          {openSwaps.length > 0 && (
             <div className="bg-slate-900/50 border border-slate-800/60 rounded-2xl p-5 space-y-3">
               <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider">
                 {lang === "fr" ? "Services ouverts (en attente de réclamation)" : "Open cover requests (awaiting a claim)"}
               </h3>
-              {appData.swapRequests.filter(r => r.status === "open").map(r => (
+              {openSwaps.map(r => (
                 <div key={r.id} className="text-xs text-slate-400 flex items-center justify-between bg-slate-950/30 rounded-xl p-3">
                   <span className="flex items-center gap-1.5">
                     <span
@@ -4685,6 +4799,94 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
               </h3>
               <p className="text-[11px] text-slate-500 leading-normal">{t("staffListSub")}</p>
 
+              {/* CSV IMPORT (Part A step 1) — appends staff from a
+                  Name / Role / Weekly-hours file. Never assigns a PIN;
+                  unmatched rows are reported below, never dropped. */}
+              <div className="bg-slate-950/40 border border-slate-800/80 rounded-xl p-3 space-y-2">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+                    <FileSpreadsheet size={12} /> {lang === "fr" ? "Importer depuis un CSV" : "Import from CSV"}
+                  </span>
+                  {/* .theme-light remaps bg-slate-800 to a near-white
+                      #f8fafc with no border drawn (border-color alone does
+                      nothing without a border-width utility) — on the white
+                      card behind it that read as "no button at all". An
+                      explicit border makes it a visible control in both
+                      themes instead of relying on that automatic remap. */}
+                  <label className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-[10px] font-semibold cursor-pointer transition-all">
+                    {lang === "fr" ? "Choisir un fichier" : "Choose file"}
+                    <input
+                      type="file"
+                      accept=".csv,text/csv"
+                      className="hidden"
+                      onChange={e => { handleCsvFile(e.target.files?.[0] || null); e.target.value = ""; }}
+                    />
+                  </label>
+                </div>
+                <p className="text-[10px] text-slate-500 leading-normal">
+                  {lang === "fr"
+                    ? "Colonnes : Nom, Poste, Heures hebdo. Les employés importés n'ont pas de code PIN — pensez à en attribuer un (voir le rappel dans la liste)."
+                    : "Columns: Name, Role, Weekly hours. Imported staff have no PIN — remember to set one (see the reminder in the list below)."}
+                </p>
+
+                {csvPreview && (
+                  <div className="space-y-2 pt-1 border-t border-slate-800/60">
+                    <div className="text-[10px] text-slate-400 font-mono truncate">{csvFileName}</div>
+
+                    {csvPreview.rows.length > 0 && (
+                      <div className="text-[11px] text-lime-400 font-semibold">
+                        {lang === "fr"
+                          ? `${csvPreview.rows.length} employé(s) prêt(s) à importer`
+                          : `${csvPreview.rows.length} staff member(s) ready to import`}
+                      </div>
+                    )}
+
+                    {csvPreview.errors.length > 0 && (
+                      <div className="space-y-1">
+                        <div className="text-[11px] text-amber-400 font-semibold">
+                          {lang === "fr"
+                            ? `${csvPreview.errors.length} ligne(s) non importable(s) :`
+                            : `${csvPreview.errors.length} row(s) can't be imported:`}
+                        </div>
+                        <div className="max-h-28 overflow-y-auto space-y-0.5">
+                          {csvPreview.errors.map((err, i) => (
+                            <div key={i} className="text-[10px] text-slate-400 font-mono">
+                              {lang === "fr" ? "L." : "L."}{err.line} — {err.reason}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {csvPreview.rows.length === 0 && csvPreview.errors.length === 0 && (
+                      <div className="text-[11px] text-slate-500 italic">
+                        {lang === "fr" ? "Ce fichier ne contient aucune ligne." : "This file has no rows."}
+                      </div>
+                    )}
+
+                    <div className="flex gap-2">
+                      <button
+                        className="px-3 py-1.5 bg-lime-400 hover:bg-lime-300 text-slate-950 rounded-lg text-[10px] font-bold transition-all disabled:opacity-40"
+                        disabled={csvPreview.rows.length === 0 || csvImporting}
+                        onClick={triggerImportStaffCsv}
+                      >
+                        {csvImporting
+                          ? "..."
+                          : lang === "fr"
+                            ? `Importer ${csvPreview.rows.length}`
+                            : `Import ${csvPreview.rows.length}`}
+                      </button>
+                      <button
+                        className="px-3 py-1.5 border border-slate-800 hover:border-slate-700 text-slate-400 rounded-lg text-[10px] font-semibold transition-all"
+                        onClick={() => { setCsvPreview(null); setCsvFileName(""); }}
+                      >
+                        {t("cancel")}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
               {/* ROLE FILTER */}
               <div className="flex flex-wrap gap-1.5">
                 <button
@@ -4720,8 +4922,37 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                         {member.name.charAt(0)}
                       </div>
                       <div className="flex flex-col min-w-0">
-                        <span className="text-xs font-bold text-slate-200 truncate">{member.name}</span>
-                        <select 
+                        {/* flex-wrap, not a plain row: without it the chip
+                            competes with the (truncating) name for width in
+                            this narrow column and squeezes it to nothing —
+                            the name must always win, the chip wraps below. */}
+                        <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
+                          <span className="text-xs font-bold text-slate-200 truncate max-w-full">{member.name}</span>
+                          {/* PIN reminder (Part A step 2) — amber, matching
+                              the app's existing "needs attention, not an
+                              error" tone. Clicking focuses the very same PIN
+                              field this row already has; the X dismisses it
+                              for this session only. */}
+                          {isPinReminderVisible(member.name) && (
+                            <span className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-amber-400/10 border border-amber-400/30 flex-shrink-0">
+                              <button
+                                className="text-[8px] font-bold text-amber-400 uppercase tracking-wide hover:text-amber-300 transition-all"
+                                title={lang === "fr" ? "Définir un code PIN pour cet employé" : "Set a PIN for this staff member"}
+                                onClick={() => document.getElementById(`pin-input-${member.name}`)?.focus()}
+                              >
+                                {lang === "fr" ? "PIN à définir" : "PIN not set"}
+                              </button>
+                              <button
+                                className="text-[9px] leading-none text-amber-400/60 hover:text-amber-300 transition-all"
+                                title={lang === "fr" ? "Masquer ce rappel" : "Dismiss this reminder"}
+                                onClick={() => setDismissedPinReminders(prev => [...prev, member.name])}
+                              >
+                                ✕
+                              </button>
+                            </span>
+                          )}
+                        </div>
+                        <select
                           className={`bg-transparent text-[10px] focus:outline-none cursor-pointer mt-0.5 ${theme === "light" ? "text-slate-600" : "text-slate-400"}`}
                           value={member.role}
                           onChange={e => triggerSaveStaffMemberFields(member.name, { role: e.target.value as RoleType })}
@@ -4759,8 +4990,11 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
 
                       <div className="flex items-center gap-1">
                         <span className="text-[10px] text-slate-500" title="Personal PIN">🔒</span>
-                        <input 
-                          className="w-20 bg-slate-950 border border-slate-800 rounded px-1.5 py-1.5 text-center font-mono font-bold text-xs text-slate-200 focus:outline-none focus:border-lime-400/50"
+                        <input
+                          id={`pin-input-${member.name}`}
+                          className={`w-20 bg-slate-950 border rounded px-1.5 py-1.5 text-center font-mono font-bold text-xs text-slate-200 focus:outline-none focus:border-lime-400/50 ${
+                            isPinReminderVisible(member.name) ? "border-amber-400/50" : "border-slate-800"
+                          }`}
                           type="text"
                           inputMode="numeric"
                           maxLength={6}

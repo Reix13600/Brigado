@@ -1,7 +1,8 @@
-import React, { useMemo, useState } from "react";
-import { ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Check, AlertTriangle, GitCompare } from "lucide-react";
+import React, { useEffect, useMemo, useState } from "react";
+import { ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Check, AlertTriangle, GitCompare, Euro, UserX, Edit3 } from "lucide-react";
 import { AppData } from "../types";
 import { aggregateMonthlyVariance, DayVarianceWithStatus, AUTO_APPROVE_THRESHOLD_MINUTES } from "../utils/variance";
+import { computeOperationsRollup } from "../utils/operationsRollup";
 import { approveVarianceDay, approveAllRemainingVariance } from "../utils/api";
 
 interface VarianceTabProps {
@@ -9,6 +10,12 @@ interface VarianceTabProps {
   lang: "fr" | "en";
   theme: "light" | "dark";
   onRefresh: () => void;
+  /** PART 7: one-shot pre-selection from an entry point elsewhere in the
+   * app (Settings' staff list, Stats' per-employee table) — same
+   * "consume once, then clear" contract as the admin dashboard's
+   * pendingFilter. `undefined` when this tab has no such caller. */
+  initialName?: string | null;
+  onInitialNameConsumed?: () => void;
 }
 
 // Local calendar-date string, deliberately not toISOString() — same
@@ -43,10 +50,23 @@ function formatHours(hours: number, withSign = false): string {
   return `${sign}${rounded % 1 === 0 ? rounded.toFixed(0) : rounded.toFixed(1)}h`;
 }
 
-export default function VarianceTab({ appData, lang, theme, onRefresh }: VarianceTabProps) {
+export default function VarianceTab({ appData, lang, theme, onRefresh, initialName, onInitialNameConsumed }: VarianceTabProps) {
   const activeStaff = useMemo(() => appData.staff.filter(s => s.active !== false), [appData.staff]);
   const [selectedName, setSelectedName] = useState<string>(activeStaff[0]?.name ?? "");
   const [monthOffset, setMonthOffset] = useState<number>(0);
+
+  // PART 7: consume a one-shot jump-in name from Settings/Stats, then
+  // clear it so a manual re-selection afterwards isn't fought on the
+  // next render. `initialName` may not (yet) be in `activeStaff` if the
+  // caller's own data is stale by one refresh — set it regardless, the
+  // <select> just won't show a highlighted match until data catches up.
+  useEffect(() => {
+    if (initialName) {
+      setSelectedName(initialName);
+      onInitialNameConsumed?.();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialName]);
   const [expanded, setExpanded] = useState<boolean>(false);
   const [noteDrafts, setNoteDrafts] = useState<Record<string, string>>({});
   const [busyDate, setBusyDate] = useState<string | null>(null);
@@ -79,6 +99,32 @@ export default function VarianceTab({ appData, lang, theme, onRefresh }: Varianc
     () => (summary?.days ?? []).filter(d => d.status === "pending").map(d => d.date),
     [summary]
   );
+
+  // PART 7: the same monthly rollup driving the Payroll Ready screen
+  // (Part 4) and the Risk Radar card (Part 5), scoped to this one
+  // employee/month — total hours, overtime, missing clock-in/out,
+  // manager corrections, and (Part 6) the shared estimated-cost
+  // calculation. Reuses computeOperationsRollup rather than deriving any
+  // of these numbers separately.
+  const monthDates = useMemo(() => {
+    const dates: string[] = [];
+    const d = new Date(monthAnchor.getFullYear(), monthAnchor.getMonth(), 1);
+    while (d <= monthEndDate) {
+      dates.push(toDateStr(d));
+      d.setDate(d.getDate() + 1);
+    }
+    return dates;
+  }, [monthKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const opsSummary = useMemo(() => {
+    if (!selectedName) return null;
+    const rollup = computeOperationsRollup(
+      monthDates, appData.entries, appData.scheduledShifts, appData.activeClockIns,
+      appData.varianceApprovals, appData.staff, appData.config,
+      { staffFilter: s => s.name === selectedName },
+    );
+    return rollup.employees[0] ?? null;
+  }, [monthDates, appData.entries, appData.scheduledShifts, appData.activeClockIns, appData.varianceApprovals, appData.staff, appData.config, selectedName]);
 
   const dayLabel = (dateStr: string) =>
     new Date(dateStr + "T00:00:00").toLocaleDateString(lang === "fr" ? "fr-FR" : "en-US", { weekday: "long", day: "2-digit", month: "short" });
@@ -153,6 +199,57 @@ export default function VarianceTab({ appData, lang, theme, onRefresh }: Varianc
           </div>
         </div>
       </div>
+
+      {/* PART 7: employee detail — extends this tab rather than a new
+          screen. Same Part 1 rollup as the Payroll Ready card and Risk
+          Radar, scoped to this one employee/month. Shown regardless of
+          whether the day-by-day variance list below has anything in it —
+          "no scheduled-vs-actual deviation this month" doesn't mean
+          "nothing to show about this employee this month." */}
+      {selectedName && opsSummary && (
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-lg">
+          <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-3">
+            {lang === "fr" ? `Résumé du mois — ${selectedName}` : `Month summary — ${selectedName}`}
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+            <div>
+              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">{lang === "fr" ? "Heures" : "Hours"}</div>
+              <div className="text-lg font-mono font-bold text-slate-100">{formatHours(opsSummary.effectiveHours)}</div>
+            </div>
+            <div>
+              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">{lang === "fr" ? "Heures sup." : "Overtime"}</div>
+              <div className={`text-lg font-mono font-bold ${opsSummary.overtimeHours > 0 ? "text-amber-400" : "text-slate-100"}`}>
+                {opsSummary.overtimeHours > 0 ? `+${formatHours(opsSummary.overtimeHours)}` : "—"}
+              </div>
+            </div>
+            <div>
+              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1">
+                <Euro size={10} /> {lang === "fr" ? "Coût estimé" : "Est. cost"}
+              </div>
+              <div className="text-lg font-mono font-bold text-slate-100">€{opsSummary.estimatedGrossCost.toFixed(0)}</div>
+            </div>
+            <div>
+              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1">
+                <UserX size={10} /> {lang === "fr" ? "Pointages manqués" : "Missing clock-ins"}
+              </div>
+              <div className={`text-lg font-mono font-bold ${opsSummary.noShowCount + opsSummary.forgottenClockOutCount > 0 ? "text-rose-400" : "text-slate-100"}`}>
+                {opsSummary.noShowCount + opsSummary.forgottenClockOutCount}
+              </div>
+            </div>
+            <div>
+              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1">
+                <Edit3 size={10} /> {lang === "fr" ? "Corrections manager" : "Manager corrections"}
+              </div>
+              <div className="text-lg font-mono font-bold text-slate-100">{opsSummary.correctionsCount}</div>
+            </div>
+          </div>
+          <p className="text-[9px] text-slate-600 mt-3 italic">
+            {lang === "fr"
+              ? "Coût estimé = taux horaire × heures effectives (avec tolérance), brut uniquement — sans charges ni impôts. À titre indicatif, ne remplace pas l'onglet Paie."
+              : "Estimated cost = hourly rate × effective hours (tolerance-adjusted), gross only — no tax or charges. For visibility only, not a replacement for the Payroll tab."}
+          </p>
+        </div>
+      )}
 
       {!selectedName ? (
         <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8 text-center text-sm text-slate-500">

@@ -500,37 +500,257 @@ async function sendEmail(to: string, subject: string, html: string): Promise<voi
 }
 
 // ── WEEKLY DIGEST ─────────────────────────────────────────────────────
+// PART 8 (Phase E/F follow-on) rebuild. Content is now shaped on the
+// same rollup categories as operationsRollup.ts's Part 1 (hours worked,
+// overtime, missing clock-ins, upcoming week's shift count, pending
+// variance) — but this is NOT a straight import of that module.
+// functions/ is a genuinely separate TS project from src/ (see "Stack &
+// structure" in CLAUDE.md — reservedSlugs.ts is mirrored by hand for the
+// same reason), so effectiveHours.ts's tolerance-aware shift-pairing and
+// variance.ts's split-shift matcher cannot be called from here. What
+// follows is a simplified, day-level PORT of the same categories,
+// computed directly against Firestore: date+name presence (not
+// per-shift time-pairing) for missing clock-ins, and a 15-minute-floor
+// day-total delta (not variance.ts's per-component pairing) for pending
+// variance. Good enough for a weekly count in an email; NOT a
+// replacement for the app's own Variance tab or effectiveHours-backed
+// screens, which remain the precise source of truth.
+
+const toDateStr = (d: Date): string => {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+};
+
+interface WeeklyDigestData {
+  restoName: string;
+  slug: string;
+  lang: "fr" | "en";
+  weekStartLabel: string;
+  weekEndLabel: string;
+  hoursWorked: number;
+  overtimeHours: number;
+  missingClockIns: number;
+  upcomingWeekShiftCount: number;
+  pendingVarianceCount: number;
+  pendingTimeOffCount: number;
+  claimedSwapCount: number;
+}
 
 async function buildDigestForRestaurant(slug: string): Promise<{ html: string; restoName: string } | null> {
   const restoSnap = await db.doc(`restaurants/${slug}`).get();
   if (!restoSnap.exists) return null;
-  const config = restoSnap.data()?.config || {};
+  const restoData = restoSnap.data() || {};
+  const config = restoData.config || {};
+  const restoName = config.resto_name || slug;
+  const staff: Array<{ name: string; contract?: number; active?: boolean }> = restoData.staff || [];
+  const lang: "fr" | "en" = restoData.preferredLang === "en" ? "en" : "fr";
 
-  const weekAgo = new Date();
+  const now = new Date();
+  const weekAgo = new Date(now);
   weekAgo.setDate(weekAgo.getDate() - 7);
+  const weekAgoStr = toDateStr(weekAgo);
+  const todayStr = toDateStr(now);
+  const weekAheadEnd = new Date(now);
+  weekAheadEnd.setDate(weekAheadEnd.getDate() + 6);
+  const weekAheadEndStr = toDateStr(weekAheadEnd);
 
-  const entriesSnap = await db.collection(`restaurants/${slug}/entries`).get();
-  const entries = entriesSnap.docs.map((d: FirebaseFirestore.QueryDocumentSnapshot) => d.data());
-  const recentApproved = entries.filter((e: any) => e.status === "approved" && e.type === "worked" && new Date(e.date) >= weekAgo);
-  const totalHours = recentApproved.reduce((s: number, e: any) => s + e.hours, 0);
-  const flaggedCount = entries.filter((e: any) => e.flagged && new Date(e.date) >= weekAgo).length;
-  const pendingCount = entries.filter((e: any) => e.status === "pending" || e.status === "correction").length;
+  const [entriesSnap, scheduledSnap, approvalsSnap, timeOffSnap, swapSnap] = await Promise.all([
+    db.collection(`restaurants/${slug}/entries`).get(),
+    db.collection(`restaurants/${slug}/scheduledShifts`).get(),
+    db.collection(`restaurants/${slug}/varianceApprovals`).get(),
+    db.collection(`restaurants/${slug}/timeOffRequests`).where("status", "==", "pending").get(),
+    db.collection(`restaurants/${slug}/swapRequests`).where("status", "==", "claimed").get(),
+  ]);
 
-  const timeOffSnap = await db.collection(`restaurants/${slug}/timeOffRequests`).where("status", "==", "pending").get();
-  const swapSnap = await db.collection(`restaurants/${slug}/swapRequests`).where("status", "==", "claimed").get();
+  const entries = entriesSnap.docs.map((d: FirebaseFirestore.QueryDocumentSnapshot) => d.data() as any);
+  const scheduled = scheduledSnap.docs.map((d: FirebaseFirestore.QueryDocumentSnapshot) => d.data() as any);
+  const approvedIds = new Set(approvalsSnap.docs.map((d: FirebaseFirestore.QueryDocumentSnapshot) => d.id));
 
-  const html = `
-    <h2>Weekly digest — ${config.resto_name || slug}</h2>
-    <ul>
-      <li><b>${totalHours.toFixed(1)}h</b> approved hours in the last 7 days</li>
-      <li><b>${flaggedCount}</b> flagged entries this week</li>
-      <li><b>${pendingCount}</b> entries awaiting approval right now</li>
-      <li><b>${timeOffSnap.size}</b> pending time-off requests</li>
-      <li><b>${swapSnap.size}</b> cover requests awaiting your decision</li>
-    </ul>
-    <p><a href="https://brigado.solutions/${slug}">Open Brigado</a></p>
-  `;
-  return { html, restoName: config.resto_name || slug };
+  // Hours worked + overtime — RAW hours (same source the live Payroll
+  // tab uses), not tolerance-adjusted effectiveHours, per the discipline
+  // that effectiveHours is never wired into anything pay-adjacent
+  // without validation (see Phase A in CLAUDE.md). "Overtime" here means
+  // this restaurant's own per-employee contract threshold, same
+  // getContractHours() definition used everywhere else, applied to the
+  // last 7 days.
+  const recentApproved = entries.filter((e: any) => e.status === "approved" && e.type === "worked" && e.date >= weekAgoStr && e.date <= todayStr);
+  const hoursWorked = recentApproved.reduce((s: number, e: any) => s + (e.hours || 0), 0);
+  const hoursByName: Record<string, number> = {};
+  recentApproved.forEach((e: any) => { hoursByName[e.name] = (hoursByName[e.name] || 0) + (e.hours || 0); });
+  const overtimeLimit = config.overtime_limit || 35;
+  let overtimeHours = 0;
+  for (const s of staff) {
+    if (s.active === false) continue;
+    const contract = s.contract || overtimeLimit;
+    overtimeHours += Math.max(0, (hoursByName[s.name] || 0) - contract);
+  }
+
+  // Missing clock-ins: a scheduled shift in the past 7 days (excluding
+  // today, which may still be in progress) with no worked entry at all
+  // for that name+date — a true no-show by presence, not by per-shift
+  // time-pairing (see module doc comment above).
+  const workedKeys = new Set(entries.filter((e: any) => e.type === "worked").map((e: any) => `${e.name}__${e.date}`));
+  const missingClockIns = scheduled.filter((s: any) => s.date >= weekAgoStr && s.date < todayStr && !workedKeys.has(`${s.name}__${s.date}`)).length;
+
+  // Upcoming week's shift count: today through +6 days.
+  const upcomingWeekShiftCount = scheduled.filter((s: any) => s.date >= todayStr && s.date <= weekAheadEndStr).length;
+
+  // Pending variance: day-level scheduled-vs-worked hour delta over a
+  // 15-minute floor (matching variance.ts's AUTO_APPROVE_THRESHOLD_
+  // MINUTES in spirit, not the exact per-shift-component floor), with no
+  // varianceApprovals doc on record. Doc id format —
+  // `${date}__${encodeURIComponent(name)}` — matches
+  // src/utils/variance.ts's varianceApprovalId() exactly (see CLAUDE.md).
+  const scheduledHoursByKey: Record<string, number> = {};
+  scheduled.forEach((s: any) => {
+    const k = `${s.name}__${s.date}`;
+    scheduledHoursByKey[k] = (scheduledHoursByKey[k] || 0) + (s.hours || 0);
+  });
+  const workedHoursByKey: Record<string, number> = {};
+  entries.filter((e: any) => e.type === "worked" && e.status === "approved").forEach((e: any) => {
+    const k = `${e.name}__${e.date}`;
+    workedHoursByKey[k] = (workedHoursByKey[k] || 0) + (e.hours || 0);
+  });
+  let pendingVarianceCount = 0;
+  for (const key of Object.keys(scheduledHoursByKey)) {
+    if (!(key in workedHoursByKey)) continue;
+    if (Math.abs(workedHoursByKey[key] - scheduledHoursByKey[key]) < 0.25) continue;
+    const sepIdx = key.indexOf("__");
+    const name = key.slice(0, sepIdx);
+    const date = key.slice(sepIdx + 2);
+    if (approvedIds.has(`${date}__${encodeURIComponent(name)}`)) continue;
+    pendingVarianceCount++;
+  }
+
+  const dateFmt = (d: Date) => d.toLocaleDateString(lang === "fr" ? "fr-FR" : "en-US", { day: "2-digit", month: "short" });
+  const html = buildDigestHtml({
+    restoName, slug, lang,
+    weekStartLabel: dateFmt(weekAgo), weekEndLabel: dateFmt(now),
+    hoursWorked, overtimeHours, missingClockIns, upcomingWeekShiftCount, pendingVarianceCount,
+    pendingTimeOffCount: timeOffSnap.size, claimedSwapCount: swapSnap.size,
+  });
+  return { html, restoName };
+}
+
+/** Professional, inline-styled, table-based HTML — deliberately not
+ * relying on <style>/@media, which many email clients strip. The header
+ * logo (public/logo-email.png → served at brigado.solutions/logo-email.
+ * png once deployed) has its own solid navy background BAKED INTO the
+ * PNG, so it reads correctly regardless of the email client's own
+ * background — sidesteps the light/dark-theme contrast problem the
+ * in-app logo needed a second recolored asset for entirely, since email
+ * has no equivalent of the app's theme toggle to react to. System font
+ * stack only (no @font-face) for the same reliability reason. ~1 page:
+ * one stat grid, two secondary lines, one CTA, one footer. */
+function buildDigestHtml(d: WeeklyDigestData): string {
+  const fr = d.lang === "fr";
+  const stat = (label: string, value: string, accent = false) => `
+    <td style="padding:14px 10px;text-align:center;border:1px solid #e2e8f0;border-radius:10px;background:#f8fafc;">
+      <div style="font-family:Helvetica,Arial,sans-serif;font-size:22px;font-weight:800;color:${accent ? "#65a30d" : "#0f172a"};line-height:1.2;">${value}</div>
+      <div style="font-family:Helvetica,Arial,sans-serif;font-size:10px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#64748b;margin-top:4px;">${label}</div>
+    </td>`;
+  const spacer = `<td style="width:8px;"></td>`;
+
+  return `<!doctype html>
+<html>
+  <body style="margin:0;padding:0;background:#eef2f6;font-family:Helvetica,Arial,sans-serif;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#eef2f6;padding:24px 12px;">
+      <tr><td align="center">
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.08);">
+
+          <!-- HEADER — logo carries its own dark background, contrast-safe in any client -->
+          <tr>
+            <td style="background:#0a0e1a;padding:20px 24px;">
+              <img src="https://brigado.solutions/logo-email.png" alt="Brigado" width="140" style="display:block;border:0;height:auto;" />
+            </td>
+          </tr>
+
+          <!-- INTRO -->
+          <tr>
+            <td style="padding:28px 24px 8px 24px;">
+              <div style="font-family:Helvetica,Arial,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#65a30d;">
+                ${fr ? "Résumé hebdomadaire" : "Weekly digest"}
+              </div>
+              <h1 style="font-family:Helvetica,Arial,sans-serif;font-size:20px;font-weight:800;color:#0f172a;margin:6px 0 2px 0;">
+                ${d.restoName}
+              </h1>
+              <p style="font-family:Helvetica,Arial,sans-serif;font-size:12px;color:#64748b;margin:0;">
+                ${d.weekStartLabel} – ${d.weekEndLabel}
+              </p>
+            </td>
+          </tr>
+
+          <!-- STAT GRID -->
+          <tr>
+            <td style="padding:16px 24px 4px 24px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  ${stat(fr ? "Heures travaillées" : "Hours worked", `${d.hoursWorked.toFixed(1)}h`)}
+                  ${spacer}
+                  ${stat(fr ? "Heures sup." : "Overtime", `${d.overtimeHours.toFixed(1)}h`, d.overtimeHours > 0)}
+                </tr>
+                <tr><td colspan="3" style="height:8px;"></td></tr>
+                <tr>
+                  ${stat(fr ? "Pointages manqués" : "Missing clock-ins", String(d.missingClockIns), d.missingClockIns > 0)}
+                  ${spacer}
+                  ${stat(fr ? "Services — semaine prochaine" : "Shifts — next week", String(d.upcomingWeekShiftCount))}
+                </tr>
+                <tr><td colspan="3" style="height:8px;"></td></tr>
+                <tr>
+                  ${stat(fr ? "Écarts en attente" : "Pending variance", String(d.pendingVarianceCount), d.pendingVarianceCount > 0)}
+                  ${spacer}
+                  ${stat(fr ? "Congés en attente" : "Pending time off", String(d.pendingTimeOffCount))}
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          ${d.claimedSwapCount > 0 ? `
+          <tr>
+            <td style="padding:16px 24px 0 24px;">
+              <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:10px 14px;font-family:Helvetica,Arial,sans-serif;font-size:12px;color:#92400e;">
+                ${fr
+                  ? `<b>${d.claimedSwapCount}</b> échange(s) de service en attente de votre décision.`
+                  : `<b>${d.claimedSwapCount}</b> cover request(s) awaiting your decision.`}
+              </div>
+            </td>
+          </tr>` : ""}
+
+          <!-- CTA -->
+          <tr>
+            <td style="padding:24px;">
+              <table role="presentation" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td style="background:#a3e635;border-radius:10px;">
+                    <a href="https://brigado.solutions/${d.slug}"
+                       style="display:inline-block;padding:12px 22px;font-family:Helvetica,Arial,sans-serif;font-size:13px;font-weight:800;color:#0f172a;text-decoration:none;">
+                      ${fr ? "Ouvrir Brigado →" : "Open Brigado →"}
+                    </a>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- FOOTER -->
+          <tr>
+            <td style="padding:16px 24px 24px 24px;border-top:1px solid #e2e8f0;">
+              <p style="font-family:Helvetica,Arial,sans-serif;font-size:10px;color:#94a3b8;margin:0;line-height:1.5;">
+                ${fr
+                  ? "Chiffres estimés à titre indicatif — vérifiez dans l'app avant toute décision de paie."
+                  : "Estimated figures for visibility only — verify in the app before any payroll decision."}
+                <br />Brigado · brigado.solutions
+              </p>
+            </td>
+          </tr>
+
+        </table>
+      </td></tr>
+    </table>
+  </body>
+</html>`;
 }
 
 // Runs every Sunday at 20:00 Europe/Paris, across every restaurant that
@@ -767,6 +987,13 @@ export const sendDigestNow = onCall(
     if (!slug || !email) {
       throw new HttpsError("invalid-argument", "slug and email are required");
     }
+    // PART 8: this previously had no caller check at all — any signed-in
+    // (or, depending on client config, even unauthenticated) caller
+    // could trigger a digest send to an arbitrary email for an arbitrary
+    // slug. Closed using the same assertCallerIsManagerOf helper
+    // inviteManager already relies on, rather than inventing a second
+    // auth pattern.
+    await assertCallerIsManagerOf(request.auth?.uid, slug);
     const digest = await buildDigestForRestaurant(slug);
     if (!digest) {
       throw new HttpsError("not-found", `No restaurant found for slug "${slug}"`);

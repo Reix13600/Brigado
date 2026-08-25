@@ -25,6 +25,7 @@ import { getFrenchHoliday } from "../utils/holidays";
 import { DEFAULT_TOLERANCE_MINUTES, resolveToleranceMinutes } from "../utils/effectiveHours";
 import { computePlannedWeekTotal, projectDraftShift, DraftShift } from "../utils/plannedHours";
 import { findTimeOffConflict } from "../utils/timeOffConflicts";
+import { computeOperationsRollup, estimateGrossCost } from "../utils/operationsRollup";
 import { parseStaffCsv, toStaffMembers, StaffCsvResult } from "../utils/staffCsv";
 import {
   saveConfig, saveStaff, saveEntry, deleteEntry, approveAllEntries,
@@ -38,7 +39,8 @@ import {
 import { 
   Users, Calendar, DollarSign, BarChart3, Settings, Clipboard,
   TrendingUp, Award, Clock, ArrowRight, ShieldAlert, AlertCircle,
-  FileSpreadsheet, Printer, Mail, Plus, Trash2, Check, X, Eye, EyeOff, Copy
+  FileSpreadsheet, Printer, Mail, Plus, Trash2, Check, X, Eye, EyeOff, Copy,
+  ChevronUp, ChevronDown
 } from "lucide-react";
 import {
   ResponsiveContainer, BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
@@ -166,6 +168,19 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
   // isManagerOf(). Guarded by a ref so the periodic token refreshes that
   // also fire watchAuthState don't each trigger a refetch; this effect has
   // an empty dep array, so onRefresh() can't feed back into it.
+  // Part 3 (Phase F): expand/collapse the no-show / forgotten-clock-out
+  // badge's flagged list.
+  const [showOpsAlerts, setShowOpsAlerts] = useState<boolean>(false);
+  // PART 7: one-shot handoff into the Variance tab pre-selected to one
+  // employee — same "set + switch tab, consumed once and cleared" shape
+  // as the admin dashboard's own pendingFilter (see CLAUDE.md's Overview
+  // tab section). Entry points: a name in Settings' staff list, or a row
+  // in Stats' per-employee operations table (Part 6/7).
+  const [varianceJumpName, setVarianceJumpName] = useState<string | null>(null);
+  const jumpToVariance = (name: string) => {
+    setVarianceJumpName(name);
+    setActiveTab("variance");
+  };
   const didRefetchForManager = useRef(false);
   useEffect(() => {
     const unsubscribe = watchAuthState(async (user) => {
@@ -525,6 +540,26 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
   const getContractHours = (name: string) => {
     const member = appData.staff.find(s => s.name === name);
     return member?.contract || overtimeLimit;
+  };
+
+  // PART 4 (Phase E/F follow-on): converts getRange()'s {start,end} Date
+  // pair into the date-STRING list computeOperationsRollup expects.
+  // getRange() can span a whole year in "year" mode, so this is capped —
+  // the Payroll Ready card only ever needs "week" or "month" in practice,
+  // but a runaway year-mode loop would be a real perf cliff on click.
+  const enumerateDateRange = (start: Date, end: Date): string[] => {
+    const dates: string[] = [];
+    const d = new Date(start);
+    d.setHours(0, 0, 0, 0);
+    const last = new Date(end);
+    last.setHours(0, 0, 0, 0);
+    let guard = 0;
+    while (d <= last && guard < 400) {
+      dates.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`);
+      d.setDate(d.getDate() + 1);
+      guard++;
+    }
+    return dates;
   };
 
   // Role filtering
@@ -1559,6 +1594,26 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
     setScheduleModalOpen(true);
   };
 
+  // Part 2 (Phase E): the Monday-Sunday week CONTAINING an arbitrary
+  // date, for the scheduling-time overtime warning below. Deliberately
+  // NOT getWeekDatesOffset (which is anchored on "today" + a week
+  // count) — a shift can be dragged, duplicated, or copy-week'd onto any
+  // date regardless of which week the Rota Planner currently has in
+  // view, and the warning must reflect THAT shift's real week, not
+  // whatever week happens to be on screen. Same Monday-first math as
+  // checkComplianceWarnings' own weekly aggregate, for one convention.
+  const getWeekDatesContaining = (dateStr: string): string[] => {
+    const d = new Date(dateStr + "T00:00:00");
+    const dow = d.getDay() || 7;
+    const monday = new Date(d);
+    monday.setDate(d.getDate() - dow + 1);
+    return Array.from({ length: 7 }, (_, i) => {
+      const day = new Date(monday);
+      day.setDate(monday.getDate() + i);
+      return `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, "0")}-${String(day.getDate()).padStart(2, "0")}`;
+    });
+  };
+
   // Part 6: the ONE place every "create/move a scheduled shift"
   // interaction funnels through, so the approved-time-off block + its
   // two-step override is enforced identically everywhere a shift can be
@@ -1567,6 +1622,19 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
   // `skipConflictCheck` is used ONLY by the override modal's own confirm
   // handler below, once a manager has explicitly said "schedule it
   // anyway" for THIS specific shift — every other caller always checks.
+  //
+  // Phase E (Part 2) piggybacks on this SAME chokepoint for the
+  // scheduling-time overtime warning, so it fires identically for every
+  // creation path without a second one to keep in sync — same reasoning
+  // as the time-off block above. Unlike that block, this is genuinely
+  // NON-blocking (contract hours can legitimately be exceeded with
+  // agreement, unlike approved time off): the save always happens first,
+  // unconditionally; the warning is surfaced only AFTER it succeeds, so
+  // it can never gate or delay the save itself. It is also a DIFFERENT
+  // threshold from checkComplianceWarnings' existing weekly48h alert
+  // (that one is the legal 48h/week ceiling; this one is the employee's
+  // own CONTRACT hours, Phase C's `computePlannedWeekTotal` threshold) —
+  // the two coexist and can both fire for the same shift.
   const trySaveScheduledShift = async (
     shift: ScheduledShift,
     opts?: { onSaved?: () => void; skipConflictCheck?: boolean }
@@ -1582,6 +1650,27 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
       await saveScheduledShift(shift);
       onRefresh();
       opts?.onSaved?.();
+
+      // Phase E overtime warning — computed via projectDraftShift/
+      // computePlannedWeekTotal, the EXACT function backing the live
+      // Rota Planner counter (Phase C), reused rather than reimplemented.
+      // Projected against the shift as just saved, so it reflects the
+      // real resulting week regardless of whether appData has refreshed
+      // yet.
+      if (shift.name) {
+        const weekDates = getWeekDatesContaining(shift.date);
+        const projected = projectDraftShift(appData.scheduledShifts || [], {
+          id: shift.id, name: shift.name, date: shift.date, startTime: shift.startTime, endTime: shift.endTime,
+        });
+        const total = computePlannedWeekTotal(shift.name, weekDates, projected, appData.staff, appData.config);
+        if (total.level !== "under") {
+          alert(
+            lang === "fr"
+              ? `${shift.name} : ${total.plannedHours.toFixed(1)}h planifiées cette semaine (contrat ${total.thresholdHours}h). Service enregistré — juste un rappel.`
+              : `${shift.name}: ${total.plannedHours.toFixed(1)}h scheduled this week (contract ${total.thresholdHours}h). Shift saved — just a heads-up.`
+          );
+        }
+      }
     } catch (err) {
       console.error(err);
     }
@@ -2221,6 +2310,181 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
       {/* ── APERÇU (OVERVIEW) TAB ───────────────────────── */}
       {activeTab === "overview" && (
         <div className="space-y-6 animate-fade-in">
+          {/* Part 3 (Phase F): compact, pull-based clock-in issues badge —
+              computed live on every dashboard open, not a scheduled
+              function or push notification, per the confirmed decision.
+              Scoped to TODAY for no-shows (matches the "N issues today"
+              framing exactly) — forgotten clock-outs are current live
+              state regardless of date, by computeOperationsRollup's own
+              design (see operationsRollup.ts). Reuses Part 1's rollup
+              rather than a bespoke query. */}
+          {(() => {
+            const now = new Date();
+            const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+            const opsToday = computeOperationsRollup(
+              [todayStr], appData.entries, appData.scheduledShifts || [], appData.activeClockIns,
+              appData.varianceApprovals, appData.staff, appData.config,
+            );
+            const flaggedEmployees = opsToday.employees.filter(e => e.noShowCount > 0 || e.forgottenClockOutCount > 0);
+            const issueCount = opsToday.totals.totalNoShows + opsToday.totals.totalForgottenClockOuts;
+            if (issueCount === 0) return null;
+
+            return (
+              <div className="bg-rose-500/[0.04] border border-rose-500/20 rounded-2xl overflow-hidden">
+                <button
+                  className="w-full flex items-center justify-between p-4 text-left"
+                  onClick={() => setShowOpsAlerts(v => !v)}
+                >
+                  <span className="text-xs font-bold text-rose-400 uppercase tracking-wider flex items-center gap-2">
+                    <AlertCircle size={14} />
+                    {lang === "fr" ? `${issueCount} problème(s) de pointage aujourd'hui` : `${issueCount} clock-in issue(s) today`}
+                  </span>
+                  {showOpsAlerts ? <ChevronUp size={16} className="text-rose-400" /> : <ChevronDown size={16} className="text-rose-400" />}
+                </button>
+                {showOpsAlerts && (
+                  <div className="px-4 pb-4 space-y-2">
+                    {flaggedEmployees.map(e => (
+                      <div key={e.name} className="space-y-1.5">
+                        {e.noShows.map(ns => (
+                          <div key={`ns-${ns.date}-${ns.scheduled.id}`} className="flex items-center justify-between bg-slate-950/40 border border-slate-800/60 rounded-xl p-3 text-xs">
+                            <span className="flex items-center gap-2">
+                              <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase bg-rose-400/10 text-rose-400">
+                                {lang === "fr" ? "Absence" : "No-show"}
+                              </span>
+                              <strong className="text-slate-200">{e.name}</strong>
+                              <span className="text-slate-500 font-mono">{ns.scheduled.startTime}–{ns.scheduled.endTime}</span>
+                            </span>
+                            <span className="text-slate-500">{lang === "fr" ? "Prévu, jamais pointé" : "Scheduled, never clocked in"}</span>
+                          </div>
+                        ))}
+                        {e.forgottenClockOuts.map(fc => (
+                          <div key={`fc-${fc.clockInAt}`} className="flex items-center justify-between bg-slate-950/40 border border-slate-800/60 rounded-xl p-3 text-xs">
+                            <span className="flex items-center gap-2">
+                              <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase bg-amber-400/10 text-amber-400">
+                                {lang === "fr" ? "Sortie oubliée" : "Forgotten clock-out"}
+                              </span>
+                              <strong className="text-slate-200">{e.name}</strong>
+                              <span className="text-slate-500 font-mono">
+                                {new Date(fc.clockInAt).toLocaleTimeString(lang === "fr" ? "fr-FR" : "en-US", { hour: "2-digit", minute: "2-digit" })}
+                              </span>
+                            </span>
+                            <span className="text-slate-500">
+                              {lang === "fr" ? `Pointé depuis ${fc.hoursElapsed.toFixed(1)}h` : `Clocked in ${fc.hoursElapsed.toFixed(1)}h ago`}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* PART 5: RISK RADAR — week-scoped (Mon–Sun containing today),
+              also computeOperationsRollup, deliberately a DIFFERENT card
+              from Part 3's today-only clock-in badge above: this one is
+              "here's what deserves a look this week," not an urgent
+              today alert, and it covers signals the badge doesn't
+              (overtime, unexplained variance, uncommented corrections).
+              Each flagged row links into the tab that already owns that
+              detail (Payroll for hours/OT, Variance — now carrying
+              Part 7's per-employee detail — for missing clock-ins,
+              pending variance, and corrections) rather than duplicating
+              it here.
+              Break-inconsistency (also asked for in the original spec)
+              is DELIBERATELY NOT included: Step 0 confirmed no distinct
+              break-tracking event exists anywhere in types.ts —
+              breakAfter6h/coupure2h in compliance.ts are both INFERRED
+              from shift gaps, not real punch events — so there is no
+              "actual break vs. planned break" to compare. Building that
+              would mean adding new break-tracking infrastructure, which
+              the task explicitly said not to do here; flagged as a
+              deferred future item in this session's report. */}
+          {(() => {
+            const now = new Date();
+            const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+            const weekDates = getWeekDatesContaining(todayStr);
+            const weekRollup = computeOperationsRollup(
+              weekDates, appData.entries, appData.scheduledShifts || [], appData.activeClockIns,
+              appData.varianceApprovals, appData.staff, appData.config,
+            );
+
+            type RiskItem = { key: string; name: string; label: string; detail: string; tone: string; onClick: () => void };
+            const items: RiskItem[] = [];
+            weekRollup.employees.forEach(e => {
+              if (e.overtimeHours > 0) {
+                items.push({
+                  key: `ot-${e.name}`, name: e.name, tone: "text-amber-400",
+                  label: lang === "fr" ? "Heures sup." : "Overtime",
+                  detail: lang === "fr" ? `+${e.overtimeHours.toFixed(1)}h cette semaine` : `+${e.overtimeHours.toFixed(1)}h this week`,
+                  onClick: () => setActiveTab("payroll"),
+                });
+              }
+              if (e.forgottenClockOutCount > 0) {
+                items.push({
+                  key: `fc-${e.name}`, name: e.name, tone: "text-rose-400",
+                  label: lang === "fr" ? "Sortie non pointée" : "Missing clock-out",
+                  detail: lang === "fr" ? "Toujours pointé, sortie manquante" : "Still clocked in, no clock-out",
+                  onClick: () => jumpToVariance(e.name),
+                });
+              }
+              if (e.pendingVarianceCount > 0) {
+                items.push({
+                  key: `pv-${e.name}`, name: e.name, tone: "text-amber-400",
+                  label: lang === "fr" ? "Écart planning/pointage" : "Planned vs. actual mismatch",
+                  detail: lang === "fr" ? `${e.pendingVarianceCount} jour(s) non expliqué(s)` : `${e.pendingVarianceCount} unexplained day(s)`,
+                  onClick: () => jumpToVariance(e.name),
+                });
+              }
+              if (e.correctionsCount > 0) {
+                items.push({
+                  key: `cr-${e.name}`, name: e.name, tone: "text-sky-400",
+                  label: lang === "fr" ? "Correction manager" : "Manager correction",
+                  detail: lang === "fr" ? `${e.correctionsCount} heure(s) modifiée(s) cette semaine` : `${e.correctionsCount} hour edit(s) this week`,
+                  onClick: () => jumpToVariance(e.name),
+                });
+              }
+            });
+
+            if (items.length === 0) return null;
+
+            return (
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-lg">
+                <div className="px-4 pt-4 pb-2 flex items-center justify-between">
+                  <span className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-2">
+                    <ShieldAlert size={14} className="text-amber-400" />
+                    {lang === "fr" ? "À surveiller cette semaine" : "Worth a look this week"}
+                  </span>
+                  <span className="text-[10px] text-slate-500">{items.length}</span>
+                </div>
+                <div className="px-4 pb-4 space-y-1.5">
+                  {items.map(item => (
+                    <button
+                      key={item.key}
+                      type="button"
+                      onClick={item.onClick}
+                      className="w-full flex items-center justify-between bg-slate-950/40 hover:bg-slate-950/70 border border-slate-800/60 rounded-xl p-3 text-xs text-left transition-colors"
+                    >
+                      <span className="flex items-center gap-2 min-w-0">
+                        <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase flex-shrink-0 ${item.tone} bg-current/10`}>
+                          {item.label}
+                        </span>
+                        <strong className="text-slate-200 truncate">{item.name}</strong>
+                      </span>
+                      <span className="text-slate-500 flex-shrink-0 ml-2">{item.detail}</span>
+                    </button>
+                  ))}
+                </div>
+                <p className="px-4 pb-4 text-[9px] text-slate-600 italic">
+                  {lang === "fr"
+                    ? "Points à surveiller, pas une garantie de conformité — vérifiez avant d'agir."
+                    : "Things worth a look, not a compliance guarantee — verify before acting."}
+                </p>
+              </div>
+            );
+          })()}
+
           {/* RANGE SELECT */}
           <div className="flex flex-wrap items-center gap-3 bg-slate-900/40 border border-slate-800/80 rounded-2xl p-4">
             <div className="flex bg-slate-950 border border-slate-800 rounded-xl p-1 text-xs">
@@ -3025,6 +3289,93 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
             </div>
           </div>
 
+          {/* PART 4: PAYROLL READY — the same computeOperationsRollup that
+              backs the ops-alert badge (Part 3) and the Risk Radar (Part
+              5), scoped to whatever range/role filter is currently
+              selected above, so its numbers always agree with the table
+              below it. Export button reuses triggerExportPayrollCSV
+              UNCHANGED — this card summarizes, it does not replace the
+              export. */}
+          {(() => {
+            const { start, end } = getRange();
+            const rollupDates = enumerateDateRange(start, end);
+            const rollup = computeOperationsRollup(
+              rollupDates, appData.entries, appData.scheduledShifts || [], appData.activeClockIns,
+              appData.varianceApprovals, appData.staff, appData.config,
+              { staffFilter: s => (activeRoleFilter === "all" || s.role === activeRoleFilter) && s.active !== false },
+            );
+            const missingClockIns = rollup.totals.totalNoShows + rollup.totals.totalForgottenClockOuts;
+            const firstFlagged = (predicate: (e: typeof rollup.employees[number]) => boolean) =>
+              rollup.employees.find(predicate)?.name;
+
+            const Stat = ({ label, value, tone, onClick }: { label: string; value: React.ReactNode; tone?: string; onClick?: () => void }) => {
+              const inner = (
+                <>
+                  <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">{label}</div>
+                  <div className={`text-xl font-mono font-bold mt-1 ${tone || "text-slate-100"}`}>{value}</div>
+                </>
+              );
+              return onClick ? (
+                <button type="button" onClick={onClick} className="text-left rounded-xl -m-1 p-1 hover:bg-slate-800/40 transition-colors">
+                  {inner}
+                </button>
+              ) : <div>{inner}</div>;
+            };
+
+            return (
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-lg space-y-3">
+                <div className="flex items-center gap-2 text-xs font-bold text-lime-400 uppercase tracking-wider">
+                  <Check size={14} /> {lang === "fr" ? "Prêt pour la paie" : "Payroll Ready"}
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+                  <Stat label={lang === "fr" ? "Employés" : "Employees"} value={rollup.totals.employeeCount} />
+                  <Stat label={lang === "fr" ? "Heures travaillées" : "Hours worked"} value={`${rollup.totals.totalEffectiveHours.toFixed(1)}h`} />
+                  <Stat
+                    label={lang === "fr" ? "Heures sup." : "Overtime"}
+                    value={`${rollup.totals.totalOvertimeHours.toFixed(1)}h`}
+                    tone={rollup.totals.totalOvertimeHours > 0 ? "text-amber-400" : undefined}
+                  />
+                  <Stat
+                    label={lang === "fr" ? "Pointages manquants" : "Missing clock-ins"}
+                    value={missingClockIns}
+                    tone={missingClockIns > 0 ? "text-rose-400" : undefined}
+                    onClick={missingClockIns > 0 ? () => {
+                      const name = firstFlagged(e => e.noShowCount + e.forgottenClockOutCount > 0);
+                      if (name) jumpToVariance(name);
+                    } : undefined}
+                  />
+                  <Stat
+                    label={lang === "fr" ? "Corrections manager" : "Manager corrections"}
+                    value={rollup.totals.totalCorrections}
+                    tone={rollup.totals.totalCorrections > 0 ? "text-amber-400" : undefined}
+                  />
+                  <Stat
+                    label={lang === "fr" ? "Écarts inexpliqués" : "Unexplained deviations"}
+                    value={rollup.totals.totalPendingVariance}
+                    tone={rollup.totals.totalPendingVariance > 0 ? "text-amber-400" : undefined}
+                    onClick={rollup.totals.totalPendingVariance > 0 ? () => {
+                      const name = firstFlagged(e => e.pendingVarianceCount > 0);
+                      if (name) jumpToVariance(name);
+                    } : undefined}
+                  />
+                </div>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-1">
+                  <p className="text-[9px] text-slate-600 italic max-w-md">
+                    {lang === "fr"
+                      ? "Chiffres estimés (heures effectives, tolérance incluse) — vérifiez les écarts inexpliqués avant export. Ne remplace pas un contrôle manuel."
+                      : "Estimated figures (effective hours, tolerance-adjusted) — review unexplained deviations before exporting. Not a substitute for a manual check."}
+                  </p>
+                  <button
+                    className="px-3 py-1.5 bg-lime-400 hover:bg-lime-300 text-slate-950 rounded-xl text-xs font-bold flex items-center gap-1.5 flex-shrink-0"
+                    onClick={triggerExportPayrollCSV}
+                  >
+                    <FileSpreadsheet size={14} /> {lang === "fr" ? "Exporter la paie" : "Export payroll"}
+                  </button>
+                </div>
+              </div>
+            );
+          })()}
+
           {/* WARNING SECTION */}
           {pendingEntries.length > 0 && (
             <div className="bg-amber-400/[0.04] border border-amber-400/30 rounded-2xl p-4 text-xs text-amber-400 flex gap-2">
@@ -3614,6 +3965,31 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                                   ⚠️ +{plannedTotal.overBy.toFixed(1)}h
                                 </span>
                               )}
+                              {/* PART 6: rate × effective hours (ONE
+                                  calculation, shared with Stats and Part
+                                  7's employee detail). Deliberately
+                                  ACTUAL clocked hours, not the planned
+                                  total above — shows €0 for a week not
+                                  worked yet, which is correct, not a
+                                  bug. */}
+                              {member.rate > 0 && (() => {
+                                const weekOps = computeOperationsRollup(
+                                  weekDates, appData.entries, shifts, appData.activeClockIns,
+                                  appData.varianceApprovals, appData.staff, appData.config,
+                                  { staffFilter: s => s.name === member.name },
+                                );
+                                const cost = weekOps.employees[0]?.estimatedGrossCost ?? 0;
+                                return (
+                                  <span
+                                    className={`block text-[9px] text-slate-500 font-mono mt-1.5 ${printHideAlerts ? "print:hidden" : ""}`}
+                                    title={lang === "fr"
+                                      ? "Coût estimé sur les heures effectives déjà pointées cette semaine (brut, hors charges) — pas les heures planifiées"
+                                      : "Estimated cost from effective hours already clocked this week (gross, no charges) — not the planned hours"}
+                                  >
+                                    ~€{cost.toFixed(0)}
+                                  </span>
+                                );
+                              })()}
                             </td>
                           </tr>
                         );
@@ -4284,11 +4660,15 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
       )}
 
       {activeTab === "variance" && (
-        <VarianceTab appData={appData} lang={lang} theme={theme} onRefresh={onRefresh} />
+        <VarianceTab
+          appData={appData} lang={lang} theme={theme} onRefresh={onRefresh}
+          initialName={varianceJumpName}
+          onInitialNameConsumed={() => setVarianceJumpName(null)}
+        />
       )}
 
       {activeTab === "stats" && (
-        <StatsPage appData={appData} lang={lang} theme={theme} onRefresh={onRefresh} />
+        <StatsPage appData={appData} lang={lang} theme={theme} onRefresh={onRefresh} onSelectEmployee={jumpToVariance} />
       )}
 
       {/* ── PARAMÈTRES (SETTINGS) TAB ───────────────────────── */}
@@ -4927,7 +5307,18 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                             this narrow column and squeezes it to nothing —
                             the name must always win, the chip wraps below. */}
                         <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
-                          <span className="text-xs font-bold text-slate-200 truncate max-w-full">{member.name}</span>
+                          {/* PART 7 entry point (a): clicking the name
+                              jumps into the Variance tab pre-selected to
+                              this employee, same one-shot handoff Part
+                              6/7's Stats table row-click uses. */}
+                          <button
+                            type="button"
+                            onClick={() => jumpToVariance(member.name)}
+                            title={lang === "fr" ? "Voir le détail (onglet Écarts)" : "View detail (Variance tab)"}
+                            className="text-xs font-bold text-slate-200 hover:text-lime-400 truncate max-w-full text-left transition-colors"
+                          >
+                            {member.name}
+                          </button>
                           {/* PIN reminder (Part A step 2) — amber, matching
                               the app's existing "needs attention, not an
                               error" tone. Clicking focuses the very same PIN

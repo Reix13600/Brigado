@@ -4,10 +4,11 @@ import {
   RadialBarChart, RadialBar, LineChart, Line, ComposedChart,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
 } from "recharts";
-import { BarChart3, AlertTriangle, Flag, Gauge, ChevronLeft, ChevronRight, X, Mail, TrendingUp, TrendingDown, Minus, CalendarDays } from "lucide-react";
+import { BarChart3, AlertTriangle, Flag, Gauge, ChevronLeft, ChevronRight, X, Mail, TrendingUp, TrendingDown, Minus, CalendarDays, Euro } from "lucide-react";
 import { AppData, RoleType, StaffMember } from "../types";
 import { getRoleColor } from "../utils/roleColors";
 import { saveWeekRevenue } from "../utils/api";
+import { computeOperationsRollup } from "../utils/operationsRollup";
 import MiniCalendar from "./MiniCalendar";
 
 interface StatsPageProps {
@@ -15,6 +16,11 @@ interface StatsPageProps {
   lang: "fr" | "en";
   theme: "light" | "dark";
   onRefresh: () => void;
+  /** PART 7 entry point (b): clicking an employee row here jumps into
+   * the Variance tab pre-selected to that employee, same one-shot
+   * handoff as the admin dashboard's pendingFilter (see CLAUDE.md).
+   * Optional so StatsPage still renders standalone/in isolation. */
+  onSelectEmployee?: (name: string) => void;
 }
 
 const ROLE_LABELS: Record<RoleType, { fr: string; en: string }> = {
@@ -80,7 +86,7 @@ const toDateStr = (d: Date) => {
   return `${y}-${m}-${day}`;
 };
 
-export default function StatsPage({ appData, lang, theme, onRefresh }: StatsPageProps) {
+export default function StatsPage({ appData, lang, theme, onRefresh, onSelectEmployee }: StatsPageProps) {
   const [statsWeeks, setStatsWeeks] = useState<number>(8);
   const [revenueDrafts, setRevenueDrafts] = useState<Record<string, string>>({});
   const [savingRevenue, setSavingRevenue] = useState<string | null>(null);
@@ -178,6 +184,31 @@ export default function StatsPage({ appData, lang, theme, onRefresh }: StatsPage
       avgWeekly: statsWeeks > 0 ? Math.round(((staffHoursTotal[s.name] ?? 0) / statsWeeks) * 10) / 10 : 0,
     }))
     .sort((a, b) => b.avgWeekly - a.avgWeekly);
+
+  // ── PART 6/7: per-employee operations table — one row per active
+  // employee over the same statsWeeks period as the rest of this page,
+  // via Part 1's shared rollup (effective hours, overtime, missing
+  // clock-ins, corrections, estimated cost — all one calculation, not
+  // re-derived per surface). Capped at 400 days like the other
+  // range-to-dates helpers in this codebase; statsWeeks tops out well
+  // under that in the UI.
+  const opsDates: string[] = [];
+  {
+    const d = new Date(rangeStart);
+    d.setHours(0, 0, 0, 0);
+    const last = new Date(now);
+    last.setHours(0, 0, 0, 0);
+    let guard = 0;
+    while (d <= last && guard < 400) {
+      opsDates.push(toDateStr(d));
+      d.setDate(d.getDate() + 1);
+      guard++;
+    }
+  }
+  const opsRollup = computeOperationsRollup(
+    opsDates, appData.entries, appData.scheduledShifts || [], appData.activeClockIns,
+    appData.varianceApprovals, appData.staff, appData.config,
+  ).employees.slice().sort((a, b) => b.effectiveHours - a.effectiveHours);
 
   // ── Busiest day of week — a single navigable week, not the whole period ──
   const dayLabels = lang === "fr" ? ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"] : ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -614,6 +645,69 @@ export default function StatsPage({ appData, lang, theme, onRefresh }: StatsPage
                 </BarChart>
               </ResponsiveContainer>
             </div>
+          </div>
+
+          {/* PART 6/7: per-employee operations table */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-lg">
+            <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider mb-1">
+              {lang === "fr" ? "Détail par employé" : "Per-employee detail"}
+            </h3>
+            <p className="text-[10px] text-slate-500 mb-4">
+              {lang === "fr"
+                ? "Cliquez sur un employé pour voir le détail complet dans l'onglet Écarts."
+                : "Click an employee to see the full detail in the Variance tab."}
+            </p>
+            {opsRollup.length === 0 ? (
+              <p className="text-xs text-slate-500 text-center py-4">{lang === "fr" ? "Aucun employé actif." : "No active staff."}</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="text-slate-500 uppercase tracking-wider text-[9px]">
+                      <th className="py-2 pr-3">{lang === "fr" ? "Employé" : "Employee"}</th>
+                      <th className="py-2 px-3">{lang === "fr" ? "Heures" : "Hours"}</th>
+                      <th className="py-2 px-3">{lang === "fr" ? "Heures sup." : "Overtime"}</th>
+                      <th className="py-2 px-3 flex items-center gap-1"><Euro size={10} /> {lang === "fr" ? "Coût est." : "Est. cost"}</th>
+                      <th className="py-2 px-3">{lang === "fr" ? "Pointages manqués" : "Missing clock-ins"}</th>
+                      <th className="py-2 pl-3">{lang === "fr" ? "Corrections" : "Corrections"}</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/60">
+                    {opsRollup.map(e => {
+                      const missing = e.noShowCount + e.forgottenClockOutCount;
+                      const row = (
+                        <>
+                          <td className="py-2.5 pr-3 font-semibold text-slate-200">{e.name}</td>
+                          <td className="py-2.5 px-3 font-mono text-slate-300">{e.effectiveHours.toFixed(1)}h</td>
+                          <td className={`py-2.5 px-3 font-mono ${e.overtimeHours > 0 ? "text-amber-400 font-bold" : "text-slate-500"}`}>
+                            {e.overtimeHours > 0 ? `+${e.overtimeHours.toFixed(1)}h` : "—"}
+                          </td>
+                          <td className="py-2.5 px-3 font-mono text-slate-300">€{e.estimatedGrossCost.toFixed(0)}</td>
+                          <td className={`py-2.5 px-3 font-mono ${missing > 0 ? "text-rose-400 font-bold" : "text-slate-500"}`}>{missing || "—"}</td>
+                          <td className={`py-2.5 pl-3 font-mono ${e.correctionsCount > 0 ? "text-sky-400 font-bold" : "text-slate-500"}`}>{e.correctionsCount || "—"}</td>
+                        </>
+                      );
+                      return onSelectEmployee ? (
+                        <tr
+                          key={e.name}
+                          onClick={() => onSelectEmployee(e.name)}
+                          className="hover:bg-slate-800/30 cursor-pointer transition-colors"
+                        >
+                          {row}
+                        </tr>
+                      ) : (
+                        <tr key={e.name}>{row}</tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <p className="text-[9px] text-slate-600 mt-3 italic">
+              {lang === "fr"
+                ? "Coût estimé = taux horaire × heures effectives, brut uniquement — indicatif, ne remplace pas l'onglet Paie."
+                : "Estimated cost = hourly rate × effective hours, gross only — for visibility, not a replacement for the Payroll tab."}
+            </p>
           </div>
 
           {/* BUSIEST DAY OF WEEK (week-navigable) + ABSENCE RATE */}

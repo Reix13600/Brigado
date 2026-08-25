@@ -162,9 +162,10 @@ describe("computeOperationsRollup — mixed real-world scenario", () => {
     const entries: HourEntry[] = [
       // Marie worked day 1, exactly on schedule (no variance).
       worked("Marie", "2026-08-10", [shift("09:00", "17:00", 8)]),
-      // Anthony worked day 1 with a manager-corrected entry and a real deviation (pending variance).
+      // Anthony worked day 1 with a manager-corrected entry, a real deviation
+      // (pending variance), AND flagged (no fresh QR scan at submission).
       worked("Anthony", "2026-08-10", [shift("09:00", "17:45", 8.75)], "approved", {
-        editedBy: "manager@lavague.fr", editedAt: new Date().toISOString(), previousHours: 8,
+        editedBy: "manager@lavague.fr", editedAt: new Date().toISOString(), previousHours: 8, flagged: true,
       }),
     ];
 
@@ -184,12 +185,14 @@ describe("computeOperationsRollup — mixed real-world scenario", () => {
     expect(marie.noShows[0].date).toBe("2026-08-11");
     expect(marie.forgottenClockOutCount).toBe(0);
     expect(marie.correctionsCount).toBe(0);
+    expect(marie.flaggedEntryCount).toBe(0);
     // rate 15 (member() default) × 8 effective hours.
     expect(marie.estimatedGrossCost).toBeCloseTo(120, 5);
 
     expect(anthony.noShowCount).toBe(0);
     expect(anthony.forgottenClockOutCount).toBe(1);
     expect(anthony.correctionsCount).toBe(1);
+    expect(anthony.flaggedEntryCount).toBe(1);
     expect(anthony.pendingVarianceCount).toBe(1); // +45min, no approval on record
 
     expect(rollup.totals.employeeCount).toBe(2);
@@ -197,8 +200,34 @@ describe("computeOperationsRollup — mixed real-world scenario", () => {
     expect(rollup.totals.totalForgottenClockOuts).toBe(1);
     expect(rollup.totals.totalCorrections).toBe(1);
     expect(rollup.totals.totalPendingVariance).toBe(1);
+    expect(rollup.totals.totalFlaggedEntries).toBe(1);
     // 8h (Marie) + 8.75h (Anthony) at rate 15 = 251.25.
     expect(rollup.totals.totalEstimatedGrossCost).toBeCloseTo(251.25, 5);
+  });
+
+  it("flaggedEntryCount counts every flagged entry in range for that employee, regardless of hours plausibility", () => {
+    // flagged is an anti-fraud/QR-freshness signal, independent of the
+    // hours value itself — a flagged entry with perfectly ordinary hours
+    // still counts, and this test also covers multiple flagged entries
+    // for the same employee across different dates.
+    const dates = ["2026-08-10", "2026-08-11", "2026-08-12"];
+    const staff = [member("Reigo")];
+    const entries: HourEntry[] = [
+      worked("Reigo", "2026-08-10", [shift("09:00", "17:00", 8)], "approved", { flagged: true }),
+      worked("Reigo", "2026-08-11", [shift("09:00", "17:00", 8)], "approved", { flagged: false }),
+      worked("Reigo", "2026-08-12", [shift("17:16", "16:31", 95.26)], "approved", { flagged: true }),
+    ];
+    const rollup = computeOperationsRollup(dates, entries, [], [], [], staff, null);
+    expect(rollup.employees[0].flaggedEntryCount).toBe(2);
+    expect(rollup.totals.totalFlaggedEntries).toBe(2);
+  });
+
+  it("flaggedEntryCount is 0, not undefined, when nothing in range is flagged", () => {
+    const staff = [member("Marie")];
+    const entries = [worked("Marie", "2026-08-10", [shift("09:00", "17:00", 8)])];
+    const rollup = computeOperationsRollup(["2026-08-10"], entries, [], [], [], staff, null);
+    expect(rollup.employees[0].flaggedEntryCount).toBe(0);
+    expect(rollup.totals.totalFlaggedEntries).toBe(0);
   });
 
   it("a fully clean employee (no issues at all) reports all zeros, not undefined/NaN", () => {

@@ -2410,6 +2410,28 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
               appData.varianceApprovals, appData.staff, appData.config,
             );
 
+            // Flagged entries are DELIBERATELY not scoped to this-week
+            // like the rest of this card: unlike overtime/variance/
+            // corrections, a flag has no "resolve" action anywhere in
+            // the codebase (see operationsRollup.ts's flaggedEntryCount
+            // doc comment) — it stays flagged indefinitely until a
+            // manager notices. Scoping it to the current Mon–Sun would
+            // make a flag silently stop showing up here after the week
+            // rolls over, even though nothing about it was resolved —
+            // exactly the "sits invisible" problem this signal exists to
+            // fix. A 30-day lookback is a pragmatic middle: wide enough
+            // that a flag from earlier in the month still surfaces,
+            // without scanning the tenant's entire history on every
+            // Overview render.
+            const flaggedLookbackStart = new Date(now);
+            flaggedLookbackStart.setDate(flaggedLookbackStart.getDate() - 30);
+            const flaggedDates = enumerateDateRange(flaggedLookbackStart, now);
+            const flaggedRollup = computeOperationsRollup(
+              flaggedDates, appData.entries, appData.scheduledShifts || [], appData.activeClockIns,
+              appData.varianceApprovals, appData.staff, appData.config,
+            );
+            const flaggedByName = new Map(flaggedRollup.employees.map(e => [e.name, e.flaggedEntryCount]));
+
             type RiskItem = { key: string; name: string; label: string; detail: string; tone: string; onClick: () => void };
             const items: RiskItem[] = [];
             weekRollup.employees.forEach(e => {
@@ -2445,6 +2467,36 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                   onClick: () => jumpToVariance(e.name),
                 });
               }
+            });
+
+            // Flagged entries — see the 30-day-lookback comment above for
+            // why this loop runs against flaggedByName (last 30 days)
+            // rather than folding into the weekRollup.employees.forEach
+            // above (this week only).
+            flaggedByName.forEach((flaggedEntryCount, name) => {
+              if (flaggedEntryCount === 0) return;
+              items.push({
+                key: `fl-${name}`, name, tone: "text-amber-400",
+                label: lang === "fr" ? "Entrée signalée" : "Flagged entry",
+                detail: lang === "fr"
+                  ? `${flaggedEntryCount} entrée(s) sans scan QR récent`
+                  : `${flaggedEntryCount} entr${flaggedEntryCount > 1 ? "ies" : "y"} without a fresh QR scan`,
+                // The Entries tab shares this component's global range
+                // state (rangeMode/customStart/customEnd) — defaulting
+                // to "week" would land on "no entries for this period"
+                // for a flag older than the current week, since a flag
+                // has no expiry (see the 30-day-lookback comment above).
+                // Setting a custom range matching that exact lookback
+                // makes the entry actually visible on arrival, not just
+                // the right person pre-selected.
+                onClick: () => {
+                  setPersonFilter(name);
+                  setCustomStart(flaggedDates[0]);
+                  setCustomEnd(flaggedDates[flaggedDates.length - 1]);
+                  setRangeMode("custom");
+                  setActiveTab("entries");
+                },
+              });
             });
 
             if (items.length === 0) return null;

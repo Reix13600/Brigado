@@ -169,6 +169,19 @@ export interface EmployeeOperationsSummary {
    * variance.ts's own aggregateMonthlyVariance rather than
    * recalculating deltas here. */
   pendingVarianceCount: number;
+  /** Follow-on to Parts 1-8: entries with `HourEntry.flagged === true`
+   * in range — submitted without a fresh QR scan (or >3 min after one),
+   * per that field's own definition in types.ts. This is an anti-
+   * fraud/legitimacy signal set once at submission time, NOT a "these
+   * hours look wrong" signal — the two are independent (an entry can be
+   * flagged with perfectly ordinary hours, or have absurd hours and not
+   * be flagged). There is no "resolve"/"unflag" action anywhere in the
+   * codebase, so a flagged entry stays flagged until a manager notices
+   * and corrects it — today the ONLY place it's visible at all is a 🚩
+   * icon on that one row in the Entries tab. This count is what lets
+   * the Risk Radar surface it without a manager having to stumble on
+   * it by scrolling. */
+  flaggedEntryCount: number;
   /** PART 6 (Phase E/F follow-on): rate × effective hours, GROSS ONLY —
    * no tax/charges applied. This is deliberately a DIFFERENT number from
    * the live Payroll tab / Stats page's existing gross/net figures,
@@ -205,6 +218,7 @@ export interface OperationsRollup {
     totalCorrections: number;
     totalPendingVariance: number;
     totalEstimatedGrossCost: number;
+    totalFlaggedEntries: number;
   };
 }
 
@@ -277,6 +291,7 @@ export function computeOperationsRollup(
     );
 
     const correctionsCount = inRangeEntries.filter(e => e.name === name && !!e.editedBy).length;
+    const flaggedEntryCount = inRangeEntries.filter(e => e.name === name && !!e.flagged).length;
 
     const variance = aggregateMonthlyVariance(name, inRangeEntries, scheduled, approvals, options?.autoApproveEnabled);
     const pendingVarianceCount = variance.days.filter(d => d.status === "pending").length;
@@ -294,6 +309,7 @@ export function computeOperationsRollup(
       forgottenClockOuts,
       correctionsCount,
       pendingVarianceCount,
+      flaggedEntryCount,
       estimatedGrossCost: estimateGrossCost(effectiveHours, member.rate),
     };
   });
@@ -308,8 +324,9 @@ export function computeOperationsRollup(
       totalCorrections: acc.totalCorrections + e.correctionsCount,
       totalPendingVariance: acc.totalPendingVariance + e.pendingVarianceCount,
       totalEstimatedGrossCost: acc.totalEstimatedGrossCost + e.estimatedGrossCost,
+      totalFlaggedEntries: acc.totalFlaggedEntries + e.flaggedEntryCount,
     }),
-    { employeeCount: 0, totalEffectiveHours: 0, totalOvertimeHours: 0, totalNoShows: 0, totalForgottenClockOuts: 0, totalCorrections: 0, totalPendingVariance: 0, totalEstimatedGrossCost: 0 },
+    { employeeCount: 0, totalEffectiveHours: 0, totalOvertimeHours: 0, totalNoShows: 0, totalForgottenClockOuts: 0, totalCorrections: 0, totalPendingVariance: 0, totalEstimatedGrossCost: 0, totalFlaggedEntries: 0 },
   );
 
   return { employees, totals };

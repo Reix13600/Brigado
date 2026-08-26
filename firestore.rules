@@ -150,6 +150,36 @@ service cloud.firestore {
             isSignedIn() &&
             resource.data.status in ['pending', 'correction'] &&
             request.resource.data.name == resource.data.name
+          ) ||
+          // ROOT CAUSE FIX (found investigating "correction request never
+          // reaches the manager"): the branch above only lets staff touch
+          // an entry that is STILL pending/correction. In practice entries
+          // get approved quickly (auto-approval or a manager's habitual
+          // bulk-approve), so by the time a staff member notices something
+          // wrong and taps "Send to manager," the entry is almost always
+          // already `approved` — and this rule silently rejected the
+          // write. The client's catch block only logged to console, so
+          // nothing told the staff member it failed; the "confirmation"
+          // they saw was just the button click, not a successful save.
+          // Verified against real production data: 32/32 la-vague entries
+          // are `approved` and ZERO have ever had a correctionNote set —
+          // consistent with every correction attempt failing here, always.
+          //
+          // Fix: also allow a staff member to move an APPROVED entry to
+          // `correction`, but ONLY that one transition, and ONLY the
+          // three correction-related fields — hours/shifts/type/date
+          // must be byte-identical to what's already there. This is the
+          // same hasOnly()-on-diff() pattern already used above for
+          // lastActiveAt, so a "corrected" entry can never double as a
+          // sneaky way for staff to alter their own already-approved
+          // hours.
+          (
+            isSignedIn() &&
+            resource.data.status == 'approved' &&
+            request.resource.data.status == 'correction' &&
+            request.resource.data.name == resource.data.name &&
+            request.resource.data.diff(resource.data).affectedKeys()
+              .hasOnly(['status', 'correctionNote', 'correctionAt'])
           )
         );
         allow delete: if isManagerOf(restaurantId) && !tenantBlocked(restaurantId);

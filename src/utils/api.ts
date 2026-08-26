@@ -7,6 +7,7 @@ import { auth, db, storage, getRestaurantId } from "../firebase";
 import { defaultComplianceRules } from "./compliance";
 import { isBlockedStatus } from "./tenantStatus";
 import { varianceApprovalId } from "./variance";
+import { computeElapsedHours } from "./clockOutGuard";
 import {
   AppData, GeneralConfig, StaffMember, HourEntry, CashAdvance, ScheduledShift, ActiveClockIn, Shift,
   Announcement, PrivateMessage, TimeOffRequest, SwapRequest, VarianceApproval, ShiftTemplate, ApprovedLogo,
@@ -337,7 +338,7 @@ export async function clockOut(name: string): Promise<{ entries: HourEntry[]; ac
 
   const clockInDate = new Date(active.clockInAt);
   const now = new Date();
-  const hours = Math.max(0, (now.getTime() - clockInDate.getTime()) / (1000 * 60 * 60));
+  const hours = computeElapsedHours(active.clockInAt, now);
   const pad = (n: number) => String(n).padStart(2, "0");
   const newShift: Shift = {
     startTime: `${pad(clockInDate.getHours())}:${pad(clockInDate.getMinutes())}`,

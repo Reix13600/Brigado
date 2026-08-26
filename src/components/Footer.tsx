@@ -47,6 +47,15 @@ export default function Footer({ lang }: FooterProps) {
       </div>
       <div className="border-t border-slate-900 py-4 text-center text-[10px] font-normal text-slate-600">
         © {year} Brigado. {L(lang, "footerRights")}
+        {/* PART 3 (Phase E/F follow-on): TEMPORARY internal-testing access
+            to /admin — deliberately just a plain understated text link,
+            not a styled button, so it reads as incidental rather than a
+            real product surface. Remove once internal testing no longer
+            needs a footer entry point (the Admin dashboard itself stays
+            — this is only about having a discoverable link to it). See
+            CLAUDE.md's Site Manager admin dashboard section. */}
+        {" · "}
+        <a href="/admin" className="hover:text-slate-400 transition-colors">Admin</a>
       </div>
     </footer>
   );

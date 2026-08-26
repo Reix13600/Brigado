@@ -4,6 +4,7 @@ import { getFrenchHoliday } from "../utils/holidays";
 import { getRoleColor } from "../utils/roleColors";
 import { getTranslation, LangType } from "../utils/translations";
 import { saveEntry, saveDayNote, deleteEntry, clockIn, clockOut, cancelClockIn, sendMessage, requestTimeOff, requestSwap, claimSwap, cancelSwapClaim, markThreadRead } from "../utils/api";
+import { computeElapsedHours, IMPLAUSIBLE_DURATION_THRESHOLD_HOURS } from "../utils/clockOutGuard";
 import {
   User, Calendar, Clock, CheckCircle2, AlertTriangle, ShieldAlert,
   ArrowRight, Check, X, XCircle, Clipboard, ArrowLeft, RefreshCw, Eye, EyeOff, LogIn, LogOut,
@@ -281,6 +282,28 @@ export default function StaffDashboard({ appData, lang, setLang, onRefresh, them
 
   const handleClockOut = async () => {
     if (!selectedStaff) return;
+
+    // PART 2 (Phase E/F follow-on): the proactive fix behind the Reigo
+    // production entry — a forgotten clock-out that closed against the
+    // wrong reference point produced a nonsense 95.26h shift. Warn
+    // BEFORE saving, using the EXACT SAME formula clockOut() itself
+    // saves (computeElapsedHours, shared from api.ts) so the number
+    // shown here can never drift from what actually gets written.
+    // Genuinely non-blocking in the sense that mattered when this was
+    // speced: there is always a way to actually complete the clock-out
+    // (confirm proceeds; cancel just returns them to where they were,
+    // free to clock out again a moment later if this was a
+    // double-check) — nobody is ever locked out.
+    if (activeClockIn) {
+      const projectedHours = computeElapsedHours(activeClockIn.clockInAt);
+      if (projectedHours > IMPLAUSIBLE_DURATION_THRESHOLD_HOURS) {
+        const msg = lang === "fr"
+          ? `Ce service affiche ${projectedHours.toFixed(1)}h — est-ce correct ?`
+          : `This shift shows ${projectedHours.toFixed(1)}h — is that correct?`;
+        if (!confirm(msg)) return;
+      }
+    }
+
     setClockingBusy(true);
     try {
       await clockOut(selectedStaff);
@@ -414,6 +437,17 @@ export default function StaffDashboard({ appData, lang, setLang, onRefresh, them
       setCorrectionTargetId(null);
     } catch (err) {
       console.error(err);
+      // This modal used to fail SILENTLY on a permission-denied (e.g. the
+      // Firestore rules rejecting a correction request on an already-
+      // approved entry, the actual root cause of a real "manager never
+      // got my correction" report) — the modal just stayed open with no
+      // explanation. Surfacing it here means a future failure looks like
+      // a failure, not an ambiguous nothing.
+      alert(
+        lang === "fr"
+          ? "Échec de l'envoi. Réessayez, ou signalez-le à votre gérant directement."
+          : "Couldn't send this. Try again, or flag it to your manager directly."
+      );
     }
   };
 

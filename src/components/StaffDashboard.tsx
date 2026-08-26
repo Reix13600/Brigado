@@ -5,6 +5,8 @@ import { getRoleColor } from "../utils/roleColors";
 import { getTranslation, LangType } from "../utils/translations";
 import { saveEntry, saveDayNote, deleteEntry, clockIn, clockOut, cancelClockIn, sendMessage, requestTimeOff, requestSwap, claimSwap, cancelSwapClaim, markThreadRead } from "../utils/api";
 import { computeElapsedHours, IMPLAUSIBLE_DURATION_THRESHOLD_HOURS } from "../utils/clockOutGuard";
+import { activeStaffOnly } from "../utils/staffFilters";
+import { formatTime24 } from "../utils/timeFormat";
 import {
   User, Calendar, Clock, CheckCircle2, AlertTriangle, ShieldAlert,
   ArrowRight, Check, X, XCircle, Clipboard, ArrowLeft, RefreshCw, Eye, EyeOff, LogIn, LogOut,
@@ -81,7 +83,7 @@ export default function StaffDashboard({ appData, lang, setLang, onRefresh, them
     setSelectedDate(`${y}-${m}-${d}`);
   }, []);
 
-  const staffList = appData.staff.filter(s => s.active !== false);
+  const staffList = activeStaffOnly(appData.staff);
   const config = appData.config;
   const todayStr = (() => {
     const d = new Date();
@@ -567,7 +569,7 @@ export default function StaffDashboard({ appData, lang, setLang, onRefresh, them
                   <div className="flex items-center gap-1.5 text-[11px] font-semibold text-lime-400 bg-lime-400/10 border border-lime-400/30 rounded-full px-3 py-1.5 w-fit">
                     <span className="w-1.5 h-1.5 rounded-full bg-lime-400 animate-pulse flex-shrink-0" />
                     {lang === "fr" ? "Pointé depuis" : "Clocked in since"}{" "}
-                    {new Date(activeClockIn.clockInAt).toLocaleTimeString(lang === "fr" ? "fr-FR" : "en-US", { hour: "2-digit", minute: "2-digit" })}
+                    {formatTime24(activeClockIn.clockInAt)}
                   </div>
                   <button
                     className="flex items-center gap-1 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-full text-[11px] font-semibold transition-all disabled:opacity-50"
@@ -1425,7 +1427,7 @@ export default function StaffDashboard({ appData, lang, setLang, onRefresh, them
                           {lang === "fr" ? "Pointé depuis" : "Clocked in since"}
                         </div>
                         <div className="text-2xl font-mono font-bold text-slate-100">
-                          {new Date(activeClockIn.clockInAt).toLocaleTimeString(lang === "fr" ? "fr-FR" : "en-US", { hour: "2-digit", minute: "2-digit" })}
+                          {formatTime24(activeClockIn.clockInAt)}
                         </div>
                         <div className="text-xs text-slate-500 font-mono">
                           {(() => {

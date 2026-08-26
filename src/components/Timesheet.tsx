@@ -2,6 +2,7 @@ import React from "react";
 import { createPortal } from "react-dom";
 import { X, Printer } from "lucide-react";
 import { HourEntry, StaffMember, GeneralConfig } from "../types";
+import { formatTime24 } from "../utils/timeFormat";
 
 interface TimesheetProps {
   staff: StaffMember;
@@ -24,9 +25,12 @@ export default function Timesheet({ staff, entries, periodLabel, config, lang, o
   const totalHours = approved.filter(e => e.type === "worked").reduce((s, e) => s + e.hours, 0);
   const absenceDays = approved.filter(e => e.type !== "worked").length;
 
-  const generatedAt = new Date().toLocaleString(lang === "fr" ? "fr-FR" : "en-US", {
-    day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit",
-  });
+  // Same 24h-consistency fix as BookkeeperExport.tsx — see that file's
+  // comment for why this used to render 12h AM/PM in English mode.
+  const now = new Date();
+  const generatedAt = `${now.toLocaleDateString(lang === "fr" ? "fr-FR" : "en-US", {
+    day: "2-digit", month: "2-digit", year: "numeric",
+  })} ${formatTime24(now)}`;
 
   return createPortal(
     <div className="print-portal-root fixed inset-0 bg-slate-950/80 z-50 flex flex-col items-center justify-center gap-4 p-4 overflow-y-auto">

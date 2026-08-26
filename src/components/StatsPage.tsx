@@ -883,50 +883,68 @@ export default function StatsPage({ appData, lang, theme, onRefresh, onSelectEmp
                 : "Common target: 25–35%. Click a date on the calendar to enter that week's revenue."}
             </p>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6 items-start">
-              <div className="flex flex-col items-center justify-center md:col-span-1">
+              <div className="flex flex-col items-center justify-center md:col-span-1 w-full">
                 {costPctOfRevenue === null ? (
                   <div className="text-center py-6">
                     <p className="text-sm text-slate-500">{lang === "fr" ? "Aucune donnée de CA pour cette période." : "No revenue data for this period yet."}</p>
                   </div>
                 ) : (
-                  <ResponsiveContainer width="100%" height={180}>
-                    <RadialBarChart
-                      innerRadius="70%" outerRadius="100%" barSize={16}
-                      data={[{ name: "pct", value: Math.min(costPctOfRevenue, 100), fill: gaugeColor }]}
-                      startAngle={90} endAngle={-270}
-                    >
-                      <RadialBar background={{ fill: theme === "light" ? "#e2e8f0" : "#1e293b" }} dataKey="value" cornerRadius={8} />
-                    </RadialBarChart>
-                  </ResponsiveContainer>
-                )}
-                {costPctOfRevenue !== null && (
-                  <div className="text-center -mt-24">
-                    <div className="text-3xl font-mono font-bold" style={{ color: gaugeColor }}>{costPctOfRevenue.toFixed(1)}%</div>
-                    <div className="text-[10px] text-slate-500 mt-1">
-                      {lang === "fr" ? `${weeksWithRevenue.length} sem. avec CA renseigné` : `${weeksWithRevenue.length} wks with revenue entered`}
-                    </div>
-                    {/* Scale reference so the number reads in context at a
-                        glance, without needing the caption text above —
-                        same plain-div banded-bar pattern already used for
-                        the weekly digest's role comparison further up
-                        this file, not a new visual language. */}
-                    <div className="mt-3 px-2">
-                      <div className="relative h-1.5 rounded-full overflow-hidden flex">
-                        <div className="h-full bg-lime-500/70" style={{ width: "35%" }} />
-                        <div className="h-full bg-amber-500/70" style={{ width: "10%" }} />
-                        <div className="h-full bg-rose-500/70 flex-1" />
-                        <div
-                          className="absolute top-1/2 -translate-y-1/2 w-2 h-2 rounded-full border-2 border-slate-950"
-                          style={{ left: `${Math.min(costPctOfRevenue, 100)}%`, marginLeft: -4, backgroundColor: gaugeColor }}
-                        />
-                      </div>
-                      <div className="flex justify-between text-[8px] text-slate-600 font-mono mt-1">
-                        <span>0%</span>
-                        <span>35%</span>
-                        <span>100%</span>
+                  <>
+                    {/* Real bug found via a user screenshot: the percentage
+                        number used to be pulled up into the gauge's hollow
+                        center with a negative margin (-mt-24) on the whole
+                        block below it — but a negative margin also drags
+                        every NORMAL-FLOW sibling after it up by the same
+                        amount, so the caption and scale bar got dragged up
+                        into the visible ring too, rendering as if clipped
+                        ("3 W...ith revenue...red"). Fixed with the same
+                        relative-wrapper + absolute-overlay technique the
+                        role-breakdown donut above already uses for its own
+                        centered total: the number is taken OUT of flow
+                        entirely, so nothing after it is affected — the
+                        caption/scale-bar sit in plain normal flow right
+                        below the gauge, at their natural height. */}
+                    <div className="relative w-full">
+                      <ResponsiveContainer width="100%" height={180}>
+                        <RadialBarChart
+                          innerRadius="70%" outerRadius="100%" barSize={16}
+                          data={[{ name: "pct", value: Math.min(costPctOfRevenue, 100), fill: gaugeColor }]}
+                          startAngle={90} endAngle={-270}
+                        >
+                          <RadialBar background={{ fill: theme === "light" ? "#e2e8f0" : "#1e293b" }} dataKey="value" cornerRadius={8} />
+                        </RadialBarChart>
+                      </ResponsiveContainer>
+                      <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                        <div className="text-3xl font-mono font-bold" style={{ color: gaugeColor }}>{costPctOfRevenue.toFixed(1)}%</div>
                       </div>
                     </div>
-                  </div>
+                    <div className="text-center w-full">
+                      <div className="text-[10px] text-slate-500 mt-1">
+                        {lang === "fr" ? `${weeksWithRevenue.length} sem. avec CA renseigné` : `${weeksWithRevenue.length} wks with revenue entered`}
+                      </div>
+                      {/* Scale reference so the number reads in context at a
+                          glance, without needing the caption text above —
+                          same plain-div banded-bar pattern already used for
+                          the weekly digest's role comparison further up
+                          this file, not a new visual language. */}
+                      <div className="mt-3 px-2">
+                        <div className="relative h-1.5 rounded-full overflow-hidden flex">
+                          <div className="h-full bg-lime-500/70" style={{ width: "35%" }} />
+                          <div className="h-full bg-amber-500/70" style={{ width: "10%" }} />
+                          <div className="h-full bg-rose-500/70 flex-1" />
+                          <div
+                            className="absolute top-1/2 -translate-y-1/2 w-2 h-2 rounded-full border-2 border-slate-950"
+                            style={{ left: `${Math.min(costPctOfRevenue, 100)}%`, marginLeft: -4, backgroundColor: gaugeColor }}
+                          />
+                        </div>
+                        <div className="flex justify-between text-[8px] text-slate-600 font-mono mt-1">
+                          <span>0%</span>
+                          <span>35%</span>
+                          <span>100%</span>
+                        </div>
+                      </div>
+                    </div>
+                  </>
                 )}
               </div>
 

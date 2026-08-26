@@ -3,6 +3,7 @@ import { ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Check, AlertTriangle
 import { AppData } from "../types";
 import { aggregateMonthlyVariance, DayVarianceWithStatus, AUTO_APPROVE_THRESHOLD_MINUTES } from "../utils/variance";
 import { computeOperationsRollup } from "../utils/operationsRollup";
+import { activeStaffOnly } from "../utils/staffFilters";
 import { approveVarianceDay, approveAllRemainingVariance } from "../utils/api";
 
 interface VarianceTabProps {
@@ -51,7 +52,7 @@ function formatHours(hours: number, withSign = false): string {
 }
 
 export default function VarianceTab({ appData, lang, theme, onRefresh, initialName, onInitialNameConsumed }: VarianceTabProps) {
-  const activeStaff = useMemo(() => appData.staff.filter(s => s.active !== false), [appData.staff]);
+  const activeStaff = useMemo(() => activeStaffOnly(appData.staff), [appData.staff]);
   const [selectedName, setSelectedName] = useState<string>(activeStaff[0]?.name ?? "");
   const [monthOffset, setMonthOffset] = useState<number>(0);
 

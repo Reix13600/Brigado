@@ -1,6 +1,7 @@
 import { ActiveClockIn, GeneralConfig, HourEntry, ScheduledShift, StaffMember, VarianceApproval } from "../types";
 import { aggregateEffectiveHours, pairShiftsToSchedule } from "./effectiveHours";
 import { aggregateMonthlyVariance } from "./variance";
+import { isActiveStaff } from "./staffFilters";
 
 // ─────────────────────────────────────────────────────────────────────
 // Shared foundation for the Phase E (scheduling-time overtime warning)
@@ -268,7 +269,7 @@ export function computeOperationsRollup(
   config: Partial<GeneralConfig> | null | undefined,
   options?: OperationsRollupOptions,
 ): OperationsRollup {
-  const staffFilter = options?.staffFilter ?? ((s: StaffMember) => s.active !== false);
+  const staffFilter = options?.staffFilter ?? isActiveStaff;
   const dateSet = new Set(dates);
   const inRangeEntries = entries.filter(e => dateSet.has(e.date));
 

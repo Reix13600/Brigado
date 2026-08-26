@@ -2,6 +2,7 @@ import React from "react";
 import { createPortal } from "react-dom";
 import { X, Printer, Download } from "lucide-react";
 import { HourEntry, StaffMember, CashAdvance, RoleType } from "../types";
+import { formatTime24 } from "../utils/timeFormat";
 
 interface BookkeeperExportProps {
   staff: StaffMember[];
@@ -26,8 +27,21 @@ interface Row {
 export default function BookkeeperExport({
   staff, periodEntries, periodAdvances, periodLabel, restoName, roleLabels, lang, onClose,
 }: BookkeeperExportProps) {
+  // Real bug found during a staff-list audit: this used to filter to
+  // `active !== false` ONLY, which — unlike every other payroll surface
+  // (the CSV export, the Payroll tab table) — silently dropped a staff
+  // member's ALREADY-EARNED hours/advances for this period the moment
+  // they were archived, even mid-period. periodEntries/periodAdvances
+  // are historical (already scoped to the selected period), so archived
+  // status must never hide them — only forward-looking staff selection
+  // (Rota grid, message recipients) should exclude former staff. Keeps
+  // the existing "every active staff member gets a row, even at 0h"
+  // behavior unchanged; a former staff member gets a row only if they
+  // actually have something recorded in this period.
   const rows: Row[] = staff
-    .filter(s => s.active !== false)
+    .filter(s => s.active !== false
+      || periodEntries.some(e => e.name === s.name)
+      || periodAdvances.some(a => a.name === s.name))
     .map(s => {
       const hours = periodEntries
         .filter(e => e.name === s.name && e.type === "worked" && e.status === "approved")
@@ -51,9 +65,16 @@ export default function BookkeeperExport({
     { hours: 0, gross: 0, advances: 0 }
   );
 
-  const generatedAt = new Date().toLocaleString(lang === "fr" ? "fr-FR" : "en-US", {
-    day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit",
-  });
+  // Real bug found via a time-format audit: this used to be one
+  // combined toLocaleString(locale, {...hour, minute}) call with no
+  // hour12 override, so it silently rendered 12h AM/PM in English mode
+  // and 24h in French mode — same report, different format depending on
+  // language. The time portion now goes through formatTime24, THE
+  // shared 24h formatter used everywhere else in the app.
+  const now = new Date();
+  const generatedAt = `${now.toLocaleDateString(lang === "fr" ? "fr-FR" : "en-US", {
+    day: "2-digit", month: "2-digit", year: "numeric",
+  })} ${formatTime24(now)}`;
 
   const handleDownloadCSV = () => {
     const headers = [

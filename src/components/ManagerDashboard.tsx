@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   signInManagerWithEmail, signInManagerWithGoogle, signOutManager,
   isAuthorizedManager, watchAuthState,
@@ -26,6 +26,8 @@ import { DEFAULT_TOLERANCE_MINUTES, resolveToleranceMinutes } from "../utils/eff
 import { computePlannedWeekTotal, projectDraftShift, DraftShift } from "../utils/plannedHours";
 import { findTimeOffConflict } from "../utils/timeOffConflicts";
 import { computeOperationsRollup, estimateGrossCost } from "../utils/operationsRollup";
+import { activeStaffOnly, isActiveStaff } from "../utils/staffFilters";
+import { formatTime24 } from "../utils/timeFormat";
 import { parseStaffCsv, toStaffMembers, StaffCsvResult } from "../utils/staffCsv";
 import {
   saveConfig, saveStaff, saveEntry, deleteEntry, approveAllEntries,
@@ -320,6 +322,13 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
   const [csvFileName, setCsvFileName] = useState<string>("");
   const [csvImporting, setCsvImporting] = useState<boolean>(false);
   const [dismissedPinReminders, setDismissedPinReminders] = useState<string[]>([]);
+  // PART 7: individual Risk Radar alert dismissal — EXACT same pattern
+  // as dismissedPinReminders above, not a new mechanism: session-scoped
+  // (vanishes on reload) and pruned the moment its underlying condition
+  // stops being true (see the useEffect near riskItems below), so a
+  // dismissed alert can never mask a later, genuinely new occurrence of
+  // the same category for the same person.
+  const [dismissedRiskAlerts, setDismissedRiskAlerts] = useState<string[]>([]);
 
   // Part 6: time-off awareness. Set whenever trySaveScheduledShift()
   // detects the target employee has APPROVED time off covering the
@@ -1048,7 +1057,22 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
     const e = appData.entries.find(entry => entry.id === id);
     if (!e) return;
     try {
-      await saveEntry({ ...e, status: "approved", correctionNote: undefined, correctionAt: undefined });
+      // REGRESSION FIX (real bug: "Approve all" worked, individual
+      // Approve silently did nothing). Root cause: saveEntry() does a
+      // full-document setDoc() (not a merge), and this used to try to
+      // clear the correction note by setting correctionNote/correctionAt
+      // to `undefined` — but Firestore's client SDK rejects `undefined`
+      // field values outright, throwing before the write ever happens.
+      // approveAllEntries()/approveEntriesByRole() never hit this because
+      // they use updateDoc({status: "approved"}) and never touch these
+      // two fields at all. Since setDoc() already omits any key not
+      // present in the object, the fix is simply to not include these
+      // two keys — same end result (note cleared on approval), no
+      // `undefined` anywhere. Reproduced via the real console error
+      // before this fix: "Unsupported field value: undefined (found in
+      // field correctionNote...)".
+      const { correctionNote, correctionAt, ...rest } = e;
+      await saveEntry({ ...rest, status: "approved" });
       onRefresh();
     } catch (err) {
       console.error(err);
@@ -1613,6 +1637,100 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
       return `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, "0")}-${String(day.getDate()).padStart(2, "0")}`;
     });
   };
+
+  // PART 5/7: the Risk Radar's flagged items, hoisted out of the render
+  // IIFE it used to live in and into a real useMemo — needed so Part 7's
+  // dismiss-pruning effect below can see the current item keys (hooks
+  // can't be called from inside a JSX-time IIFE). Still the exact same
+  // computation: this-week overtime/missing-clock-out/pending-variance/
+  // corrections, plus the separately-scoped 30-day flagged-entry lookback
+  // (see that section's own comment for why it isn't week-scoped).
+  type RiskItem = { key: string; name: string; label: string; detail: string; tone: string; onClick: () => void };
+  const riskItems: RiskItem[] = useMemo(() => {
+    const now = new Date();
+    const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    const weekDates = getWeekDatesContaining(todayStr);
+    const weekRollup = computeOperationsRollup(
+      weekDates, appData.entries, appData.scheduledShifts || [], appData.activeClockIns,
+      appData.varianceApprovals, appData.staff, appData.config,
+    );
+
+    const flaggedLookbackStart = new Date(now);
+    flaggedLookbackStart.setDate(flaggedLookbackStart.getDate() - 30);
+    const flaggedDates = enumerateDateRange(flaggedLookbackStart, now);
+    const flaggedRollup = computeOperationsRollup(
+      flaggedDates, appData.entries, appData.scheduledShifts || [], appData.activeClockIns,
+      appData.varianceApprovals, appData.staff, appData.config,
+    );
+    const flaggedByName = new Map(flaggedRollup.employees.map(e => [e.name, e.flaggedEntryCount]));
+
+    const items: RiskItem[] = [];
+    weekRollup.employees.forEach(e => {
+      if (e.overtimeHours > 0) {
+        items.push({
+          key: `ot-${e.name}`, name: e.name, tone: "text-amber-400",
+          label: lang === "fr" ? "Heures sup." : "Overtime",
+          detail: lang === "fr" ? `+${e.overtimeHours.toFixed(1)}h cette semaine` : `+${e.overtimeHours.toFixed(1)}h this week`,
+          onClick: () => setActiveTab("payroll"),
+        });
+      }
+      if (e.forgottenClockOutCount > 0) {
+        items.push({
+          key: `fc-${e.name}`, name: e.name, tone: "text-rose-400",
+          label: lang === "fr" ? "Sortie non pointée" : "Missing clock-out",
+          detail: lang === "fr" ? "Toujours pointé, sortie manquante" : "Still clocked in, no clock-out",
+          onClick: () => jumpToVariance(e.name),
+        });
+      }
+      if (e.pendingVarianceCount > 0) {
+        items.push({
+          key: `pv-${e.name}`, name: e.name, tone: "text-amber-400",
+          label: lang === "fr" ? "Écart planning/pointage" : "Planned vs. actual mismatch",
+          detail: lang === "fr" ? `${e.pendingVarianceCount} jour(s) non expliqué(s)` : `${e.pendingVarianceCount} unexplained day(s)`,
+          onClick: () => jumpToVariance(e.name),
+        });
+      }
+      if (e.correctionsCount > 0) {
+        items.push({
+          key: `cr-${e.name}`, name: e.name, tone: "text-sky-400",
+          label: lang === "fr" ? "Correction manager" : "Manager correction",
+          detail: lang === "fr" ? `${e.correctionsCount} heure(s) modifiée(s) cette semaine` : `${e.correctionsCount} hour edit(s) this week`,
+          onClick: () => jumpToVariance(e.name),
+        });
+      }
+    });
+
+    flaggedByName.forEach((flaggedEntryCount, name) => {
+      if (flaggedEntryCount === 0) return;
+      items.push({
+        key: `fl-${name}`, name, tone: "text-amber-400",
+        label: lang === "fr" ? "Entrée signalée" : "Flagged entry",
+        detail: lang === "fr"
+          ? `${flaggedEntryCount} entrée(s) sans scan QR récent`
+          : `${flaggedEntryCount} entr${flaggedEntryCount > 1 ? "ies" : "y"} without a fresh QR scan`,
+        onClick: () => {
+          setPersonFilter(name);
+          setCustomStart(flaggedDates[0]);
+          setCustomEnd(flaggedDates[flaggedDates.length - 1]);
+          setRangeMode("custom");
+          setActiveTab("entries");
+        },
+      });
+    });
+
+    return items;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appData.entries, appData.scheduledShifts, appData.activeClockIns, appData.varianceApprovals, appData.staff, appData.config, lang]);
+
+  // PART 7: prune dismissals the moment their underlying condition is no
+  // longer true — same shape as the PIN-reminder pruning effect above.
+  // Without this, dismissing "Overtime — Marie" once would keep hiding
+  // it forever even after her hours dropped and rose again later in the
+  // same session; a stale key must not mask a fresh occurrence.
+  useEffect(() => {
+    setDismissedRiskAlerts(prev => prev.filter(k => riskItems.some(item => item.key === k)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [riskItems]);
 
   // Part 6: the ONE place every "create/move a scheduled shift"
   // interaction funnels through, so the approved-time-off block + its
@@ -2365,7 +2483,7 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                               </span>
                               <strong className="text-slate-200">{e.name}</strong>
                               <span className="text-slate-500 font-mono">
-                                {new Date(fc.clockInAt).toLocaleTimeString(lang === "fr" ? "fr-FR" : "en-US", { hour: "2-digit", minute: "2-digit" })}
+                                {formatTime24(fc.clockInAt)}
                               </span>
                             </span>
                             <span className="text-slate-500">
@@ -2402,105 +2520,8 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
               the task explicitly said not to do here; flagged as a
               deferred future item in this session's report. */}
           {(() => {
-            const now = new Date();
-            const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-            const weekDates = getWeekDatesContaining(todayStr);
-            const weekRollup = computeOperationsRollup(
-              weekDates, appData.entries, appData.scheduledShifts || [], appData.activeClockIns,
-              appData.varianceApprovals, appData.staff, appData.config,
-            );
-
-            // Flagged entries are DELIBERATELY not scoped to this-week
-            // like the rest of this card: unlike overtime/variance/
-            // corrections, a flag has no "resolve" action anywhere in
-            // the codebase (see operationsRollup.ts's flaggedEntryCount
-            // doc comment) — it stays flagged indefinitely until a
-            // manager notices. Scoping it to the current Mon–Sun would
-            // make a flag silently stop showing up here after the week
-            // rolls over, even though nothing about it was resolved —
-            // exactly the "sits invisible" problem this signal exists to
-            // fix. A 30-day lookback is a pragmatic middle: wide enough
-            // that a flag from earlier in the month still surfaces,
-            // without scanning the tenant's entire history on every
-            // Overview render.
-            const flaggedLookbackStart = new Date(now);
-            flaggedLookbackStart.setDate(flaggedLookbackStart.getDate() - 30);
-            const flaggedDates = enumerateDateRange(flaggedLookbackStart, now);
-            const flaggedRollup = computeOperationsRollup(
-              flaggedDates, appData.entries, appData.scheduledShifts || [], appData.activeClockIns,
-              appData.varianceApprovals, appData.staff, appData.config,
-            );
-            const flaggedByName = new Map(flaggedRollup.employees.map(e => [e.name, e.flaggedEntryCount]));
-
-            type RiskItem = { key: string; name: string; label: string; detail: string; tone: string; onClick: () => void };
-            const items: RiskItem[] = [];
-            weekRollup.employees.forEach(e => {
-              if (e.overtimeHours > 0) {
-                items.push({
-                  key: `ot-${e.name}`, name: e.name, tone: "text-amber-400",
-                  label: lang === "fr" ? "Heures sup." : "Overtime",
-                  detail: lang === "fr" ? `+${e.overtimeHours.toFixed(1)}h cette semaine` : `+${e.overtimeHours.toFixed(1)}h this week`,
-                  onClick: () => setActiveTab("payroll"),
-                });
-              }
-              if (e.forgottenClockOutCount > 0) {
-                items.push({
-                  key: `fc-${e.name}`, name: e.name, tone: "text-rose-400",
-                  label: lang === "fr" ? "Sortie non pointée" : "Missing clock-out",
-                  detail: lang === "fr" ? "Toujours pointé, sortie manquante" : "Still clocked in, no clock-out",
-                  onClick: () => jumpToVariance(e.name),
-                });
-              }
-              if (e.pendingVarianceCount > 0) {
-                items.push({
-                  key: `pv-${e.name}`, name: e.name, tone: "text-amber-400",
-                  label: lang === "fr" ? "Écart planning/pointage" : "Planned vs. actual mismatch",
-                  detail: lang === "fr" ? `${e.pendingVarianceCount} jour(s) non expliqué(s)` : `${e.pendingVarianceCount} unexplained day(s)`,
-                  onClick: () => jumpToVariance(e.name),
-                });
-              }
-              if (e.correctionsCount > 0) {
-                items.push({
-                  key: `cr-${e.name}`, name: e.name, tone: "text-sky-400",
-                  label: lang === "fr" ? "Correction manager" : "Manager correction",
-                  detail: lang === "fr" ? `${e.correctionsCount} heure(s) modifiée(s) cette semaine` : `${e.correctionsCount} hour edit(s) this week`,
-                  onClick: () => jumpToVariance(e.name),
-                });
-              }
-            });
-
-            // Flagged entries — see the 30-day-lookback comment above for
-            // why this loop runs against flaggedByName (last 30 days)
-            // rather than folding into the weekRollup.employees.forEach
-            // above (this week only).
-            flaggedByName.forEach((flaggedEntryCount, name) => {
-              if (flaggedEntryCount === 0) return;
-              items.push({
-                key: `fl-${name}`, name, tone: "text-amber-400",
-                label: lang === "fr" ? "Entrée signalée" : "Flagged entry",
-                detail: lang === "fr"
-                  ? `${flaggedEntryCount} entrée(s) sans scan QR récent`
-                  : `${flaggedEntryCount} entr${flaggedEntryCount > 1 ? "ies" : "y"} without a fresh QR scan`,
-                // The Entries tab shares this component's global range
-                // state (rangeMode/customStart/customEnd) — defaulting
-                // to "week" would land on "no entries for this period"
-                // for a flag older than the current week, since a flag
-                // has no expiry (see the 30-day-lookback comment above).
-                // Setting a custom range matching that exact lookback
-                // makes the entry actually visible on arrival, not just
-                // the right person pre-selected.
-                onClick: () => {
-                  setPersonFilter(name);
-                  setCustomStart(flaggedDates[0]);
-                  setCustomEnd(flaggedDates[flaggedDates.length - 1]);
-                  setRangeMode("custom");
-                  setActiveTab("entries");
-                },
-              });
-            });
-
-            if (items.length === 0) return null;
-
+            const visibleRiskItems = riskItems.filter(item => !dismissedRiskAlerts.includes(item.key));
+            if (visibleRiskItems.length === 0) return null;
             return (
               <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-lg">
                 <div className="px-4 pt-4 pb-2 flex items-center justify-between">
@@ -2508,15 +2529,17 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                     <ShieldAlert size={14} className="text-amber-400" />
                     {lang === "fr" ? "À surveiller cette semaine" : "Worth a look this week"}
                   </span>
-                  <span className="text-[10px] text-slate-500">{items.length}</span>
+                  <span className="text-[10px] text-slate-500">{visibleRiskItems.length}</span>
                 </div>
                 <div className="px-4 pb-4 space-y-1.5">
-                  {items.map(item => (
-                    <button
+                  {visibleRiskItems.map(item => (
+                    <div
                       key={item.key}
-                      type="button"
+                      role="button"
+                      tabIndex={0}
                       onClick={item.onClick}
-                      className="w-full flex items-center justify-between bg-slate-950/40 hover:bg-slate-950/70 border border-slate-800/60 rounded-xl p-3 text-xs text-left transition-colors"
+                      onKeyDown={ev => { if (ev.key === "Enter" || ev.key === " ") item.onClick(); }}
+                      className="w-full flex items-center justify-between bg-slate-950/40 hover:bg-slate-950/70 border border-slate-800/60 rounded-xl p-3 text-xs text-left transition-colors cursor-pointer"
                     >
                       <span className="flex items-center gap-2 min-w-0">
                         <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase flex-shrink-0 ${item.tone} bg-current/10`}>
@@ -2524,8 +2547,24 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                         </span>
                         <strong className="text-slate-200 truncate">{item.name}</strong>
                       </span>
-                      <span className="text-slate-500 flex-shrink-0 ml-2">{item.detail}</span>
-                    </button>
+                      <span className="flex items-center gap-2 flex-shrink-0 ml-2">
+                        <span className="text-slate-500">{item.detail}</span>
+                        {/* PART 7: individual dismiss — reuses the exact
+                            same session-scoped, live-re-evaluating
+                            pattern as the PIN-reminder chips' own ✕
+                            (dismissedPinReminders above), not a new
+                            mechanism. stopPropagation so dismissing
+                            doesn't also fire the row's own navigate. */}
+                        <button
+                          type="button"
+                          title={lang === "fr" ? "Masquer cette alerte" : "Dismiss this alert"}
+                          onClick={ev => { ev.stopPropagation(); setDismissedRiskAlerts(prev => [...prev, item.key]); }}
+                          className="text-slate-600 hover:text-rose-400 transition-colors px-0.5"
+                        >
+                          ✕
+                        </button>
+                      </span>
+                    </div>
                   ))}
                 </div>
                 <p className="px-4 pb-4 text-[9px] text-slate-600 italic">
@@ -2581,7 +2620,7 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                       <span className="w-2 h-2 rounded-full bg-lime-400 animate-pulse" />
                       <span className="text-xs font-semibold text-slate-200">{a.name}</span>
                       <span className="text-[10px] font-mono text-slate-500">
-                        {new Date(a.clockInAt).toLocaleTimeString(lang === "fr" ? "fr-FR" : "en-US", { hour: "2-digit", minute: "2-digit" })} · {h}h{String(m).padStart(2, "0")}
+                        {formatTime24(a.clockInAt)} · {h}h{String(m).padStart(2, "0")}
                       </span>
                       {a.flagged && <span className="text-amber-400 text-xs cursor-help" title={t("flaggedEntryTooltip")}>🚩</span>}
                     </div>
@@ -2914,9 +2953,22 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
 
             {/* GRID */}
             <div>
-              {/* DOW HEADERS */}
+              {/* DOW HEADERS — real bug found in a Monday-start re-audit:
+                  TRANSLATIONS[lang].days is Sunday-first (index 0 =
+                  Dimanche, matching JS's native getDay() for lookup
+                  elsewhere in the app), but the day cells below are
+                  positioned with Monday-first offset math
+                  ((firstDay.getDay() + 6) % 7). Rendering the raw array
+                  as headers put every date under the wrong weekday label,
+                  off by one column. Reordered to Monday-first, same
+                  monFirstDays technique the Monthly Rota grid already
+                  uses for this exact array. */}
               <div className="grid grid-cols-7 border-b border-slate-800/60 bg-slate-950/30 text-center text-[10px] font-bold text-slate-400 uppercase py-2.5">
-                {((TRANSLATIONS[lang]?.days || TRANSLATIONS.en.days) as string[]).map(d => <div key={d}>{d.slice(0,3)}</div>)}
+                {(() => {
+                  const days = (TRANSLATIONS[lang]?.days || TRANSLATIONS.en.days) as string[];
+                  const monFirst = [...days.slice(1), days[0]];
+                  return monFirst.map(d => <div key={d}>{d.slice(0, 3)}</div>);
+                })()}
               </div>
 
               {/* DAY CELLS */}
@@ -3248,7 +3300,7 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                                   </td>
                                   <td className="p-3 text-[11px] text-slate-500 whitespace-nowrap">
                                     {new Date(e.submittedAt).toLocaleDateString(lang === "fr" ? "fr-FR" : "en-GB", { day: "2-digit", month: "short" })}{" "}
-                                    {new Date(e.submittedAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}
+                                    {formatTime24(e.submittedAt)}
                                   </td>
                                   <td className="p-3">
                                     <div className="flex items-center gap-1.5">
@@ -3799,8 +3851,14 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/60">
-                    {/* STAFF ROWS (FILTERED BY ROLE) */}
-                    {appData.staff
+                    {/* STAFF ROWS (active + role-filtered) — real-user
+                        bug: this used to be appData.staff unfiltered by
+                        active status, so an archived staff member still
+                        got a full row here and could have new shifts
+                        dragged/clicked onto them. Their PAST shifts (the
+                        scheduledShifts query above) are untouched — this
+                        only stops NEW forward-looking assignment. */}
+                    {activeStaffOnly(appData.staff)
                       .filter(member => activeRoleFilter === "all" || member.role === activeRoleFilter)
                       .map(member => {
                         const days = getScheduleWeekDates();
@@ -4630,7 +4688,7 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                   <div>
                     <p className="text-sm text-slate-200">{a.message}</p>
                     <p className="text-[10px] text-slate-500 mt-1 font-mono">
-                      {new Date(a.postedAt).toLocaleString(lang === "fr" ? "fr-FR" : "en-US", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
+                      {new Date(a.postedAt).toLocaleDateString(lang === "fr" ? "fr-FR" : "en-US", { day: "2-digit", month: "short" })} {formatTime24(a.postedAt)}
                     </p>
                   </div>
                   <button className="p-1 text-slate-600 hover:text-rose-400 rounded" onClick={() => triggerDeleteAnnouncement(a.id)}>
@@ -4651,7 +4709,16 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
             </p>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="space-y-1.5 md:col-span-1">
-                {appData.staff.map(s => {
+                {/* Active staff, plus any archived staff who already have
+                    message history — same "stay visible if there's a
+                    reason to, otherwise excluded" shape as the Add/Edit
+                    Shift modal's staff picker. Keeps past threads
+                    readable (historical) without offering a former
+                    employee as someone to start a NEW conversation with
+                    (forward-looking) if there was never one. */}
+                {appData.staff
+                  .filter(s => isActiveStaff(s) || appData.messages.some(m => m.staffName === s.name))
+                  .map(s => {
                   const hasUnread = appData.messages.some(m => m.staffName === s.name && m.from === "staff" && !m.readAt);
                   return (
                     <button
@@ -4683,7 +4750,7 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                         <div key={m.id} className={`max-w-[80%] rounded-xl px-3 py-2 text-xs ${m.from === "manager" ? "bg-lime-400/10 text-lime-300 ml-auto" : "bg-slate-800 text-slate-200"}`}>
                           {m.text}
                           <div className="text-[9px] opacity-60 mt-1 font-mono">
-                            {new Date(m.sentAt).toLocaleTimeString(lang === "fr" ? "fr-FR" : "en-US", { hour: "2-digit", minute: "2-digit" })}
+                            {formatTime24(m.sentAt)}
                           </div>
                         </div>
                       ))}
@@ -5375,18 +5442,30 @@ export default function ManagerDashboard({ appData, lang, setLang, onRefresh, th
                               the app's existing "needs attention, not an
                               error" tone. Clicking focuses the very same PIN
                               field this row already has; the X dismisses it
-                              for this session only. */}
+                              for this session only.
+                              REDESIGNED (real-user report): the original
+                              wide "PIN À DÉFINIR" text pill ate most of this
+                              narrow name column's width, truncating names
+                              like "NoPinPerson" down to "NoPinP…" — the pill
+                              displaced the one thing in this row that
+                              actually needs to stay readable. Replaced with
+                              a compact icon-only badge (~16px) carrying the
+                              same explanation via `title`; same click-to-
+                              focus and dismiss behavior, just far smaller
+                              footprint. */}
                           {isPinReminderVisible(member.name) && (
-                            <span className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-amber-400/10 border border-amber-400/30 flex-shrink-0">
+                            <span className="inline-flex items-center flex-shrink-0">
                               <button
-                                className="text-[8px] font-bold text-amber-400 uppercase tracking-wide hover:text-amber-300 transition-all"
-                                title={lang === "fr" ? "Définir un code PIN pour cet employé" : "Set a PIN for this staff member"}
+                                type="button"
+                                className="w-4 h-4 flex items-center justify-center rounded-full bg-amber-400/10 border border-amber-400/40 text-amber-400 hover:bg-amber-400/20 hover:border-amber-400/60 transition-all"
+                                title={lang === "fr" ? "PIN non défini — cliquez pour en attribuer un" : "PIN not set — click to assign one"}
                                 onClick={() => document.getElementById(`pin-input-${member.name}`)?.focus()}
                               >
-                                {lang === "fr" ? "PIN à définir" : "PIN not set"}
+                                <AlertCircle size={10} strokeWidth={2.5} />
                               </button>
                               <button
-                                className="text-[9px] leading-none text-amber-400/60 hover:text-amber-300 transition-all"
+                                type="button"
+                                className="text-[9px] leading-none text-amber-400/50 hover:text-amber-300 transition-all pl-0.5"
                                 title={lang === "fr" ? "Masquer ce rappel" : "Dismiss this reminder"}
                                 onClick={() => setDismissedPinReminders(prev => [...prev, member.name])}
                               >
